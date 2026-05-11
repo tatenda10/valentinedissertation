@@ -1,0 +1,26 @@
+@import url('https://fonts.googleapis.com/css2?family=Italianno&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@500&family=Italianno&display=swap');
+
+
+
+@import "tailwindcss";
+
+
+body {
+  overflow-y: scroll;
+  overflow-x: hidden;
+  font-family: Inter, sans-serif;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+  font-size: small;
+  background: linear-gradient(180deg, #f3f7fb 0%, #edf3f8 55%, #e7eef5 100%);
+  color: #0f172a;
+}
+
+body::-webkit-scrollbar {
+  display: none;
+}
+
+* {
+  box-sizing: border-box;
+}

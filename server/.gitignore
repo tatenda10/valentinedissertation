@@ -1,0 +1,30 @@
+# Dependencies
+node_modules/
+package-lock.json
+scripts/
+# Environment variables
+.env
+.env.*
+!.env.example
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+
+# IDE files
+.idea/
+.vscode/
+*.sublime-project
+*.sublime-workspace
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Build files
+dist/
+build/
+
+# Client directory (if it exists in the same parent directory)
+../client/ 
