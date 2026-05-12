@@ -119,6 +119,39 @@ router.post('/submit', authenticate, isClient, LoansController.submitLoan);
 
 /**
  * @swagger
+ * /api/loans/analyze-statement:
+ *   post:
+ *     summary: Upload and parse an EcoCash PDF statement
+ *     tags: [Loans]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         multipart/form-data:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - statement
+ *             properties:
+ *               statement:
+ *                 type: string
+ *                 format: binary
+ *                 description: EcoCash PDF statement file
+ *     responses:
+ *       200:
+ *         description: Statement parsed successfully
+ *       400:
+ *         description: Missing PDF file
+ *       401:
+ *         description: Unauthorized
+ *       500:
+ *         description: Server error
+ */
+router.post('/analyze-statement', authenticate, isClient, upload.single('statement'), LoansController.analyzeEcoCashStatement);
+
+/**
+ * @swagger
  * /api/loans/submit-with-pdf:
  *   post:
  *     summary: Submit a new loan application with EcoCash PDF statement
@@ -306,6 +339,232 @@ router.get('/rejected', authenticate, isAdmin, LoansController.getRejectedLoans)
 
 /**
  * @swagger
+ * /api/loans/pending:
+ *   get:
+ *     summary: Get pending loans for review (Admin only)
+ *     tags: [Loans]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: List of pending loans
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 loans:
+ *                   type: array
+ *                   items:
+ *                     $ref: '#/components/schemas/Loan'
+ *       401:
+ *         description: Unauthorized
+ *       403:
+ *         description: Forbidden - Admin access required
+ */
+router.get('/pending', authenticate, isAdmin, async (req, res) => {
+    try {
+        const { getConnection } = require('../config/database');
+        const connection = await getConnection();
+        const [loans] = await connection.execute(
+            `SELECT l.*, c.first_name, c.last_name, c.email, c.phone_number
+             FROM loans l
+             JOIN clients c ON l.client_id = c.id
+             WHERE l.status = 'pending'
+             ORDER BY l.application_date ASC`,
+        );
+        connection.release();
+        res.json({ loans });
+    } catch (error) {
+        console.error('Get pending loans error:', error);
+        res.status(500).json({ message: 'Server error', error: error.message });
+    }
+});
+
+/**
+ * @swagger
+ * /api/loans/statistics:
+ *   get:
+ *     summary: Get loan statistics for dashboard (Admin only)
+ *     tags: [Loans]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Loan statistics
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 totalLoans:
+ *                   type: integer
+ *                 totalAmount:
+ *                   type: number
+ *                 approvedLoans:
+ *                   type: integer
+ *                 rejectedLoans:
+ *                   type: integer
+ *                 pendingLoans:
+ *                   type: integer
+ *                 averageLoanAmount:
+ *                   type: number
+ *       401:
+ *         description: Unauthorized
+ *       403:
+ *         description: Forbidden - Admin access required
+ */
+router.get('/statistics', authenticate, isAdmin, async (req, res) => {
+    try {
+        const { getConnection } = require('../config/database');
+        const connection = await getConnection();
+        const [[stats]] = await connection.execute(`
+            SELECT 
+                COUNT(*) as totalLoans,
+                SUM(amount) as totalAmount,
+                SUM(CASE WHEN status = 'approved' THEN 1 ELSE 0 END) as approvedLoans,
+                SUM(CASE WHEN status = 'rejected' THEN 1 ELSE 0 END) as rejectedLoans,
+                SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) as pendingLoans,
+                AVG(amount) as averageLoanAmount
+            FROM loans
+        `);
+        connection.release();
+        res.json(stats);
+    } catch (error) {
+        console.error('Get statistics error:', error);
+        res.status(500).json({ message: 'Server error', error: error.message });
+    }
+});
+
+// ================= NEW REPORT ENDPOINTS =================
+
+/**
+ * @swagger
+ * /api/loans/reports/monthly:
+ *   get:
+ *     summary: Get monthly loan trends (Admin only)
+ *     tags: [Reports]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Monthly loan data for charts
+ */
+router.get('/reports/monthly', authenticate, isAdmin, async (req, res) => {
+    const { getConnection } = require('../config/database');
+    const connection = await getConnection();
+    try {
+        const [data] = await connection.execute(`
+            SELECT 
+                DATE_FORMAT(application_date, '%b') as month,
+                COUNT(*) as loans,
+                SUM(CASE WHEN status = 'approved' THEN 1 ELSE 0 END) as approved,
+                SUM(CASE WHEN status = 'rejected' THEN 1 ELSE 0 END) as rejected
+            FROM loans
+            WHERE application_date >= DATE_SUB(NOW(), INTERVAL 6 MONTH)
+            GROUP BY YEAR(application_date), MONTH(application_date)
+            ORDER BY application_date ASC
+        `);
+        res.json(data);
+    } catch (error) {
+        console.error('Get monthly reports error:', error);
+        res.status(500).json({ error: error.message });
+    } finally {
+        connection.release();
+    }
+});
+
+/**
+ * @swagger
+ * /api/loans/reports/gender:
+ *   get:
+ *     summary: Get loan distribution by gender (Admin only)
+ *     tags: [Reports]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Gender distribution data
+ */
+router.get('/reports/gender', authenticate, isAdmin, async (req, res) => {
+    const { getConnection } = require('../config/database');
+    const connection = await getConnection();
+    try {
+        const [data] = await connection.execute(`
+            SELECT 
+                SUM(CASE WHEN c.gender = 'male' THEN 1 ELSE 0 END) as male,
+                SUM(CASE WHEN c.gender = 'female' THEN 1 ELSE 0 END) as female
+            FROM clients c
+            JOIN loans l ON l.client_id = c.id
+            WHERE c.gender IS NOT NULL
+        `);
+        res.json(data[0] || { male: 0, female: 0 });
+    } catch (error) {
+        console.error('Get gender reports error:', error);
+        res.status(500).json({ error: error.message });
+    } finally {
+        connection.release();
+    }
+});
+
+// ================= PDF VIEWING ENDPOINT (NEW) =================
+
+/**
+ * @swagger
+ * /api/loans/pdf/{filename}:
+ *   get:
+ *     summary: View uploaded PDF statement (Admin only)
+ *     tags: [Loans]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: filename
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: PDF filename to view
+ *     responses:
+ *       200:
+ *         description: PDF file
+ *       403:
+ *         description: Forbidden
+ *       404:
+ *         description: File not found
+ */
+router.get('/pdf/:filename', authenticate, isAdmin, async (req, res) => {
+    try {
+        const fs = require('fs');
+        const path = require('path');
+        const { filename } = req.params;
+        
+        // Security: prevent directory traversal attacks
+        if (filename.includes('..') || filename.includes('/') || filename.includes('\\')) {
+            return res.status(403).json({ message: 'Invalid filename' });
+        }
+        
+        // Define the upload directory (update this to match your uploads folder)
+        const uploadDir = path.join(__dirname, '../uploads');
+        const filePath = path.join(uploadDir, filename);
+        
+        // Check if file exists
+        if (!fs.existsSync(filePath)) {
+            return res.status(404).json({ message: 'PDF file not found' });
+        }
+        
+        // Send the PDF file
+        res.setHeader('Content-Type', 'application/pdf');
+        res.setHeader('Content-Disposition', `inline; filename="${filename}"`);
+        res.sendFile(filePath);
+        
+    } catch (error) {
+        console.error('Error serving PDF:', error);
+        res.status(500).json({ message: 'Error loading PDF file' });
+    }
+});
+
+/**
+ * @swagger
  * /api/loans/{id}:
  *   get:
  *     summary: Get specific loan by ID
@@ -401,233 +660,5 @@ router.get('/:id', authenticate, LoansController.getLoanById);
  *         description: Server error
  */
 router.put('/:id/status', authenticate, isAdmin, LoansController.updateLoanStatus);
-
-/**
- * @swagger
- * /api/loans/pending:
- *   get:
- *     summary: Get pending loans for review (Admin only)
- *     tags: [Loans]
- *     security:
- *       - bearerAuth: []
- *     responses:
- *       200:
- *         description: List of pending loans
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 loans:
- *                   type: array
- *                   items:
- *                     $ref: '#/components/schemas/Loan'
- *       401:
- *         description: Unauthorized
- *       403:
- *         description: Forbidden - Admin access required
- */
-router.get('/pending', authenticate, isAdmin, async (req, res) => {
-    try {
-        const { getConnection } = require('../../config/database');
-        const connection = await getConnection();
-        const [loans] = await connection.execute(
-            `SELECT l.*, c.first_name, c.last_name, c.email, c.phone_number
-             FROM loans l
-             JOIN clients c ON l.client_id = c.id
-             WHERE l.status = 'pending'
-             ORDER BY l.application_date ASC`,
-        );
-        connection.release();
-        res.json({ loans });
-    } catch (error) {
-        console.error('Get pending loans error:', error);
-        res.status(500).json({ message: 'Server error', error: error.message });
-    }
-});
-
-/**
- * @swagger
- * /api/loans/statistics:
- *   get:
- *     summary: Get loan statistics for dashboard (Admin only)
- *     tags: [Loans]
- *     security:
- *       - bearerAuth: []
- *     responses:
- *       200:
- *         description: Loan statistics
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 totalLoans:
- *                   type: integer
- *                 totalAmount:
- *                   type: number
- *                 approvedLoans:
- *                   type: integer
- *                 rejectedLoans:
- *                   type: integer
- *                 pendingLoans:
- *                   type: integer
- *                 averageLoanAmount:
- *                   type: number
- *       401:
- *         description: Unauthorized
- *       403:
- *         description: Forbidden - Admin access required
- */
-router.get('/statistics', authenticate, isAdmin, async (req, res) => {
-    try {
-        const { getConnection } = require('../../config/database');
-        const connection = await getConnection();
-        const [[stats]] = await connection.execute(`
-            SELECT 
-                COUNT(*) as totalLoans,
-                SUM(amount) as totalAmount,
-                SUM(CASE WHEN status = 'approved' THEN 1 ELSE 0 END) as approvedLoans,
-                SUM(CASE WHEN status = 'rejected' THEN 1 ELSE 0 END) as rejectedLoans,
-                SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) as pendingLoans,
-                AVG(amount) as averageLoanAmount
-            FROM loans
-        `);
-        connection.release();
-        res.json(stats);
-    } catch (error) {
-        console.error('Get statistics error:', error);
-        res.status(500).json({ message: 'Server error', error: error.message });
-    }
-});
-
-// ================= NEW REPORT ENDPOINTS =================
-
-/**
- * @swagger
- * /api/loans/reports/monthly:
- *   get:
- *     summary: Get monthly loan trends (Admin only)
- *     tags: [Reports]
- *     security:
- *       - bearerAuth: []
- *     responses:
- *       200:
- *         description: Monthly loan data for charts
- */
-router.get('/reports/monthly', authenticate, isAdmin, async (req, res) => {
-    const { getConnection } = require('../../config/database');
-    const connection = await getConnection();
-    try {
-        const [data] = await connection.execute(`
-            SELECT 
-                DATE_FORMAT(application_date, '%b') as month,
-                COUNT(*) as loans,
-                SUM(CASE WHEN status = 'approved' THEN 1 ELSE 0 END) as approved,
-                SUM(CASE WHEN status = 'rejected' THEN 1 ELSE 0 END) as rejected
-            FROM loans
-            WHERE application_date >= DATE_SUB(NOW(), INTERVAL 6 MONTH)
-            GROUP BY YEAR(application_date), MONTH(application_date)
-            ORDER BY application_date ASC
-        `);
-        connection.release();
-        res.json(data);
-    } catch (error) {
-        console.error('Get monthly reports error:', error);
-        res.status(500).json({ error: error.message });
-    } finally {
-        connection.release();
-    }
-});
-
-/**
- * @swagger
- * /api/loans/reports/gender:
- *   get:
- *     summary: Get loan distribution by gender (Admin only)
- *     tags: [Reports]
- *     security:
- *       - bearerAuth: []
- *     responses:
- *       200:
- *         description: Gender distribution data
- */
-router.get('/reports/gender', authenticate, isAdmin, async (req, res) => {
-    const { getConnection } = require('../../config/database');
-    const connection = await getConnection();
-    try {
-        const [data] = await connection.execute(`
-            SELECT 
-                SUM(CASE WHEN c.gender = 'male' THEN 1 ELSE 0 END) as male,
-                SUM(CASE WHEN c.gender = 'female' THEN 1 ELSE 0 END) as female
-            FROM clients c
-            JOIN loans l ON l.client_id = c.id
-            WHERE c.gender IS NOT NULL
-        `);
-        connection.release();
-        res.json(data[0] || { male: 0, female: 0 });
-    } catch (error) {
-        console.error('Get gender reports error:', error);
-        res.json({ male: 50, female: 50 });
-    } finally {
-        connection.release();
-    }
-});
-
-// ================= PDF VIEWING ENDPOINT (NEW) =================
-
-/**
- * @swagger
- * /api/loans/pdf/{filename}:
- *   get:
- *     summary: View uploaded PDF statement (Admin only)
- *     tags: [Loans]
- *     security:
- *       - bearerAuth: []
- *     parameters:
- *       - in: path
- *         name: filename
- *         required: true
- *         schema:
- *           type: string
- *         description: PDF filename to view
- *     responses:
- *       200:
- *         description: PDF file
- *       403:
- *         description: Forbidden
- *       404:
- *         description: File not found
- */
-router.get('/pdf/:filename', authenticate, isAdmin, async (req, res) => {
-    try {
-        const fs = require('fs');
-        const path = require('path');
-        const { filename } = req.params;
-        
-        // Security: prevent directory traversal attacks
-        if (filename.includes('..') || filename.includes('/') || filename.includes('\\')) {
-            return res.status(403).json({ message: 'Invalid filename' });
-        }
-        
-        // Define the upload directory (update this to match your uploads folder)
-        const uploadDir = path.join(__dirname, '../../uploads');
-        const filePath = path.join(uploadDir, filename);
-        
-        // Check if file exists
-        if (!fs.existsSync(filePath)) {
-            return res.status(404).json({ message: 'PDF file not found' });
-        }
-        
-        // Send the PDF file
-        res.setHeader('Content-Type', 'application/pdf');
-        res.setHeader('Content-Disposition', `inline; filename="${filename}"`);
-        res.sendFile(filePath);
-        
-    } catch (error) {
-        console.error('Error serving PDF:', error);
-        res.status(500).json({ message: 'Error loading PDF file' });
-    }
-});
 
 module.exports = router;

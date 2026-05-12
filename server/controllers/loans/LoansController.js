@@ -1,12 +1,223 @@
 const { getConnection } = require('../../config/database');
-const { makeLoanDecision } = require('../../utils/creditScoring');
+const fs = require('fs');
 const { logAudit } = require('../../utils/auditLogger');
+const { analyzeStatement, scoreLoanApplication } = require('../../services/mlLoanScoring');
 
 const generateLoanReference = () => {
   const prefix = 'LOAN';
   const timestamp = Date.now().toString().slice(-6);
   const random = Math.floor(Math.random() * 1000).toString().padStart(3, '0');
   return `${prefix}${timestamp}${random}`;
+};
+
+const toNullableValue = (value) => (value === undefined || value === '' ? null : value);
+
+const resolveMonthlyIncome = (monthlyIncome, statementAnalysis) => {
+  const directIncome = Number(monthlyIncome);
+
+  if (Number.isFinite(directIncome) && directIncome > 0) {
+    return directIncome;
+  }
+
+  const inferredIncome = Number(statementAnalysis?.summary?.estimatedMonthlyIncome);
+  return Number.isFinite(inferredIncome) && inferredIncome > 0 ? inferredIncome : 0;
+};
+
+const buildMlPayload = ({
+  amount,
+  duration,
+  monthlyIncome,
+  employmentStatus,
+  existingLoans,
+  statementAnalysis,
+}) => ({
+  amount: Number(amount),
+  duration: Number(duration),
+  monthlyIncome: resolveMonthlyIncome(monthlyIncome, statementAnalysis),
+  employmentStatus,
+  existingLoans: existingLoans ?? 0,
+  statementSummary: statementAnalysis?.summary || null,
+});
+
+const roundCurrency = (value) => Number((Number(value) || 0).toFixed(2));
+
+const calculateAffordabilityDetails = (loanLike = {}) => {
+  const requestedAmount = Number(loanLike.amount || 0);
+  const monthlyIncome = Number(loanLike.monthly_income || loanLike.monthlyIncome || loanLike.client_income || 0);
+  const duration = Math.max(Number(loanLike.duration || 12), 1);
+  const interestRate = Number(loanLike.interest_rate || loanLike.interestRate || 14);
+  const maxMonthlyPayment = monthlyIncome > 0 ? monthlyIncome * 0.3 : 0;
+  const maxAffordableLoan =
+    maxMonthlyPayment > 0 ? (maxMonthlyPayment * duration) / (1 + interestRate / 100) : 0;
+
+  const normalizedAffordableLoan = Math.min(Math.max(roundCurrency(maxAffordableLoan), 0), 10000);
+  const recommendedAmount =
+    normalizedAffordableLoan >= 100 ? normalizedAffordableLoan : 0;
+
+  return {
+    requestedAmount: roundCurrency(requestedAmount),
+    monthlyIncome: roundCurrency(monthlyIncome),
+    duration,
+    interestRate: roundCurrency(interestRate),
+    maxMonthlyPayment: roundCurrency(maxMonthlyPayment),
+    maxAffordableLoan: normalizedAffordableLoan,
+    recommendedAmount,
+    shortfallAmount: roundCurrency(Math.max(requestedAmount - normalizedAffordableLoan, 0)),
+  };
+};
+
+const buildRejectionAssessment = (loanLike = {}) => {
+  const affordability = calculateAffordabilityDetails(loanLike);
+  const existingLoans = parseInt(loanLike.existing_loans || loanLike.existingLoans || 0, 10);
+  const employmentStatus = String(loanLike.employment_status || loanLike.employmentStatus || 'unknown').toLowerCase();
+  const riskScore = Number(loanLike.risk_score || loanLike.riskScore || 0);
+  const reasons = [];
+
+  if (affordability.monthlyIncome < 300) {
+    reasons.push(`Monthly income of $${affordability.monthlyIncome.toFixed(2)} is below the minimum requirement of $300.00.`);
+  }
+
+  if (
+    affordability.maxAffordableLoan > 0 &&
+    affordability.requestedAmount > affordability.maxAffordableLoan
+  ) {
+    reasons.push(
+      `Requested amount of $${affordability.requestedAmount.toFixed(2)} is above the affordable limit of $${affordability.maxAffordableLoan.toFixed(2)} based on current income.`
+    );
+  }
+
+  if (existingLoans >= 2) {
+    reasons.push(`Applicant already has ${existingLoans} active loan(s), which is above the allowed limit.`);
+  }
+
+  if (employmentStatus === 'unemployed') {
+    reasons.push('Stable employment or consistent business income is required before approval.');
+  }
+
+  if (employmentStatus === 'self-employed' && affordability.monthlyIncome > 0 && affordability.monthlyIncome < 500) {
+    reasons.push(`Self-employed applicants require at least $500.00 monthly income, but current income is $${affordability.monthlyIncome.toFixed(2)}.`);
+  }
+
+  if (riskScore > 0 && riskScore < 0.5) {
+    reasons.push(`Credit score signals are below the current approval threshold with a risk score of ${(riskScore * 100).toFixed(1)}%.`);
+  }
+
+  if (affordability.requestedAmount < 100) {
+    reasons.push(`Requested amount of $${affordability.requestedAmount.toFixed(2)} is below the minimum loan size of $100.00.`);
+  }
+
+  if (affordability.requestedAmount > 10000) {
+    reasons.push(`Requested amount of $${affordability.requestedAmount.toFixed(2)} exceeds the portfolio limit of $10,000.00.`);
+  }
+
+  let reasonText = reasons.join(' ');
+
+  if (!reasonText) {
+    reasonText = 'Loan application does not meet the current approval criteria based on the submitted financial profile.';
+  }
+
+  if (affordability.recommendedAmount > 0) {
+    reasonText += ` Recommended eligible amount: $${affordability.recommendedAmount.toFixed(2)}.`;
+  } else {
+    reasonText += ' No eligible loan amount can be recommended at this time.';
+  }
+
+  return {
+    reasons,
+    reasonText,
+    affordability,
+  };
+};
+
+const buildStatementOverview = (statementAnalysis) => {
+  const summary = statementAnalysis?.summary || {};
+
+  return {
+    statementCount: 1,
+    transactionCount: Number(summary.transactionCount || 0),
+    totalMoneyIn: roundCurrency(summary.totalDeposits),
+    totalMoneyOut: roundCurrency(summary.totalWithdrawals),
+    moneyInCount: Number(summary.depositCount || 0),
+    moneyOutCount: Number(summary.withdrawalCount || 0),
+    netCashFlow: roundCurrency(summary.netCashFlow),
+    estimatedMonthlyIncome: roundCurrency(summary.estimatedMonthlyIncome),
+    currentBalance: roundCurrency(summary.currentBalance),
+    daysCovered: Number(summary.daysCovered || 0),
+    activeDays: Number(summary.activeDays || 0),
+  };
+};
+
+const enrichLoanRecord = async (loan, { includeStatementAnalysis = false } = {}) => {
+  const rejectionAssessment = buildRejectionAssessment(loan);
+  const enrichedLoan = {
+    ...loan,
+    affordability: rejectionAssessment.affordability,
+    recommended_amount: rejectionAssessment.affordability.recommendedAmount,
+    max_affordable_loan: rejectionAssessment.affordability.maxAffordableLoan,
+  };
+
+  if (includeStatementAnalysis && loan?.statement_path) {
+    const resolvedPath = require('path').resolve(loan.statement_path);
+    if (fs.existsSync(resolvedPath)) {
+      const statementAnalysis = await analyzeStatement(resolvedPath);
+      enrichedLoan.statement_analysis = statementAnalysis;
+      enrichedLoan.statement_overview = buildStatementOverview(statementAnalysis);
+    }
+  }
+
+  return enrichedLoan;
+};
+
+const persistLoan = async ({
+  connection,
+  clientId,
+  amount,
+  purpose,
+  duration,
+  monthlyIncome,
+  employmentStatus,
+  existingLoans,
+  statementPath,
+  mlResult,
+}) => {
+  const loanReference = generateLoanReference();
+  const { decision } = mlResult;
+
+  const insertParams = [
+    loanReference,
+    clientId,
+    Number(amount),
+    toNullableValue(purpose),
+    Number(duration),
+    Number(decision.interestRate || 0),
+    Number(decision.monthlyPayment || 0),
+    decision.status,
+    decision.decisionReason,
+    decision.riskScore,
+    toNullableValue(monthlyIncome),
+    toNullableValue(employmentStatus),
+    existingLoans ?? 0,
+  ];
+
+  let insertQuery = `INSERT INTO loans (
+        loan_reference, client_id, amount, purpose, duration,
+        interest_rate, monthly_payment, status, decision_reason,
+        risk_score, monthly_income, employment_status, existing_loans,
+        application_date, decision_date
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`;
+
+  if (statementPath) {
+    insertQuery = `INSERT INTO loans (
+        loan_reference, client_id, amount, purpose, duration,
+        interest_rate, monthly_payment, status, decision_reason,
+        risk_score, monthly_income, employment_status, existing_loans,
+        statement_path, application_date, decision_date
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`;
+    insertParams.push(statementPath);
+  }
+
+  const [result] = await connection.execute(insertQuery, insertParams);
+  return { result, loanReference };
 };
 
 // ================= SUBMIT LOAN (WITHOUT PDF) =================
@@ -24,58 +235,27 @@ const submitLoan = async (req, res) => {
     } = req.body;
 
     const clientId = req.user.userId;
-
-    const decision = makeLoanDecision({
-      amount,
-      duration,
-      monthlyIncome,
-      employmentStatus,
-      existingLoans
-    });
-
-    const loanReference = generateLoanReference();
-    const status = decision.status;
-    const decisionReason = decision.decisionReason;
-    const riskScore = decision.riskScore;
-
-    const baseRate = 10;
-    const riskPremium = Math.floor(Math.random() * 5);
-
-    const interestRate = decision.approved
-      ? decision.interestRate
-      : baseRate + riskPremium;
-
-    const totalAmount = Number(amount) * (1 + Number(interestRate) / 100);
-
-    const monthlyPayment = decision.approved
-      ? decision.monthlyPayment
-      : totalAmount / Number(duration);
-
-    const toNull = (v) => (v === undefined || v === '' ? null : v);
-
-    const [result] = await connection.execute(
-      `INSERT INTO loans (
-        loan_reference, client_id, amount, purpose, duration,
-        interest_rate, monthly_payment, status, decision_reason,
-        risk_score, monthly_income, employment_status, existing_loans,
-        application_date, decision_date
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
-      [
-        loanReference,
-        clientId,
-        Number(amount),
-        toNull(purpose),
-        Number(duration),
-        interestRate,
-        monthlyPayment,
-        status,
-        decisionReason,
-        riskScore,
-        toNull(monthlyIncome),
-        toNull(employmentStatus),
-        existingLoans ?? 0
-      ]
+    const mlResult = await scoreLoanApplication(
+      buildMlPayload({
+        amount,
+        duration,
+        monthlyIncome,
+        employmentStatus,
+        existingLoans,
+      }),
     );
+
+    const { result } = await persistLoan({
+      connection,
+      clientId,
+      amount,
+      purpose,
+      duration,
+      monthlyIncome: resolveMonthlyIncome(monthlyIncome),
+      employmentStatus,
+      existingLoans,
+      mlResult,
+    });
 
     const [loanDetails] = await connection.execute(
       `SELECT l.*, c.first_name, c.last_name, c.email, c.phone_number
@@ -86,8 +266,13 @@ const submitLoan = async (req, res) => {
     );
 
     res.status(201).json({
-      message: `Loan application ${status}`,
-      loan: loanDetails[0]
+      message: `Loan application ${mlResult.decision.status}`,
+      loan: loanDetails[0],
+      scoring: mlResult,
+      affordability: calculateAffordabilityDetails({
+        ...loanDetails[0],
+        monthly_income: resolveMonthlyIncome(monthlyIncome),
+      }),
     });
 
   } catch (error) {
@@ -118,17 +303,16 @@ const submitLoanWithPDF = async (req, res) => {
       duration,
       monthlyIncome,
       employmentStatus,
-      existingLoans,
-      clientId
+      existingLoans
     } = req.body;
 
-    if (!amount || !purpose || !duration || !monthlyIncome || !clientId) {
+    if (!amount || !purpose || !duration) {
       return res.status(400).json({ 
         message: 'Missing required fields' 
       });
     }
 
-    const finalClientId = clientId || req.user?.userId;
+    const finalClientId = req.user?.userId;
 
     if (!finalClientId) {
       return res.status(400).json({ 
@@ -136,58 +320,31 @@ const submitLoanWithPDF = async (req, res) => {
       });
     }
 
-    const decision = makeLoanDecision({
-      amount,
-      duration,
-      monthlyIncome,
-      employmentStatus,
-      existingLoans: existingLoans || '0'
-    });
-
-    const loanReference = generateLoanReference();
-    const status = decision.status;
-    const decisionReason = decision.decisionReason;
-    const riskScore = decision.riskScore;
-
-    const baseRate = 10;
-    const riskPremium = Math.floor(Math.random() * 5);
-
-    const interestRate = decision.approved
-      ? decision.interestRate
-      : baseRate + riskPremium;
-
-    const totalAmount = Number(amount) * (1 + Number(interestRate) / 100);
-
-    const monthlyPayment = decision.approved
-      ? decision.monthlyPayment
-      : totalAmount / Number(duration);
-
-    const toNull = (v) => (v === undefined || v === '' ? null : v);
-
-    const [result] = await connection.execute(
-      `INSERT INTO loans (
-        loan_reference, client_id, amount, purpose, duration,
-        interest_rate, monthly_payment, status, decision_reason,
-        risk_score, monthly_income, employment_status, existing_loans,
-        statement_path, application_date, decision_date
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
-      [
-        loanReference,
-        finalClientId,
-        Number(amount),
-        toNull(purpose),
-        Number(duration),
-        interestRate,
-        monthlyPayment,
-        status,
-        decisionReason,
-        riskScore,
-        toNull(monthlyIncome),
-        toNull(employmentStatus),
-        existingLoans ?? 0,
-        req.file.path
-      ]
+    const statementAnalysis = await analyzeStatement(req.file.path);
+    const resolvedMonthlyIncome = resolveMonthlyIncome(monthlyIncome, statementAnalysis);
+    const mlResult = await scoreLoanApplication(
+      buildMlPayload({
+        amount,
+        duration,
+        monthlyIncome: resolvedMonthlyIncome,
+        employmentStatus,
+        existingLoans: existingLoans || '0',
+        statementAnalysis,
+      }),
     );
+
+    const { result } = await persistLoan({
+      connection,
+      clientId: finalClientId,
+      amount,
+      purpose,
+      duration,
+      monthlyIncome: resolvedMonthlyIncome,
+      employmentStatus,
+      existingLoans,
+      statementPath: req.file.path,
+      mlResult,
+    });
 
     const [loanDetails] = await connection.execute(
       `SELECT l.*, c.first_name, c.last_name, c.email, c.phone_number
@@ -198,9 +355,16 @@ const submitLoanWithPDF = async (req, res) => {
     );
 
     res.status(201).json({
-      message: `Loan application ${status} with PDF statement`,
+      message: `Loan application ${mlResult.decision.status} with PDF statement`,
       loan: loanDetails[0],
-      pdfFile: req.file.filename
+      pdfFile: req.file.filename,
+      statementAnalysis,
+      statementOverview: buildStatementOverview(statementAnalysis),
+      scoring: mlResult,
+      affordability: calculateAffordabilityDetails({
+        ...loanDetails[0],
+        monthly_income: resolvedMonthlyIncome,
+      }),
     });
 
   } catch (error) {
@@ -211,6 +375,32 @@ const submitLoanWithPDF = async (req, res) => {
     });
   } finally {
     connection.release();
+  }
+};
+
+// ================= ANALYZE ECOCASH STATEMENT =================
+const analyzeEcoCashStatement = async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({
+        message: 'Please upload your EcoCash statement PDF',
+      });
+    }
+
+    const statementAnalysis = await analyzeStatement(req.file.path);
+
+    res.json({
+      message: 'EcoCash statement processed successfully',
+      pdfFile: req.file.filename,
+      statementAnalysis,
+      statementOverview: buildStatementOverview(statementAnalysis),
+    });
+  } catch (error) {
+    console.error('EcoCash statement analysis error:', error);
+    res.status(500).json({
+      message: 'Server error while processing EcoCash statement',
+      error: error.message,
+    });
   }
 };
 
@@ -226,7 +416,14 @@ const getAllLoans = async (req, res) => {
        ORDER BY l.application_date DESC`
     );
 
-    res.json({ loans });
+    const enrichedLoans = loans.map((loan) => ({
+      ...loan,
+      affordability: calculateAffordabilityDetails(loan),
+      recommended_amount: buildRejectionAssessment(loan).affordability.recommendedAmount,
+      max_affordable_loan: buildRejectionAssessment(loan).affordability.maxAffordableLoan,
+    }));
+
+    res.json({ loans: enrichedLoans });
 
   } catch (error) {
     console.error('Get loans error:', error);
@@ -311,7 +508,9 @@ const getLoanById = async (req, res) => {
     }
 
     // statement_path is automatically included in l.*
-    res.json({ loan: loans[0] });
+    const enrichedLoan = await enrichLoanRecord(loans[0], { includeStatementAnalysis: true });
+
+    res.json({ loan: enrichedLoan });
 
   } catch (error) {
     console.error('Get loan error:', error);
@@ -347,7 +546,14 @@ const getClientLoans = async (req, res) => {
       totalAmount: loans.reduce((sum, l) => sum + parseFloat(l.amount || 0), 0)
     };
 
-    res.json({ loans, summary });
+    const enrichedLoans = loans.map((loan) => ({
+      ...loan,
+      affordability: calculateAffordabilityDetails(loan),
+      recommended_amount: buildRejectionAssessment(loan).affordability.recommendedAmount,
+      max_affordable_loan: buildRejectionAssessment(loan).affordability.maxAffordableLoan,
+    }));
+
+    res.json({ loans: enrichedLoans, summary });
 
   } catch (error) {
     console.error('Get client loans error:', error);
@@ -378,62 +584,7 @@ const generateRejectionReason = async (loanId) => {
     }
     
     const loan = loanData[0];
-    const requestedAmount = parseFloat(loan.amount);
-    const monthlyIncome = parseFloat(loan.monthly_income || loan.client_income || 0);
-    const existingLoans = parseInt(loan.existing_loans || 0);
-    const employmentStatus = loan.employment_status || 'unknown';
-    const riskScore = parseInt(loan.risk_score || 0);
-    const duration = parseInt(loan.duration || 12);
-    const interestRate = parseFloat(loan.interest_rate || 14);
-    
-    const maxMonthlyPayment = monthlyIncome * 0.3;
-    const maxAffordableLoan = (maxMonthlyPayment * duration) / (1 + (interestRate / 100));
-    
-    const reasons = [];
-    
-    if (monthlyIncome < 300) {
-      reasons.push(`Monthly income of $${monthlyIncome.toFixed(2)} is below minimum requirement of $300`);
-    }
-    
-    if (requestedAmount > maxAffordableLoan && maxAffordableLoan > 0) {
-      reasons.push(`Requested $${requestedAmount.toFixed(2)} exceeds your maximum affordable loan of $${maxAffordableLoan.toFixed(2)} based on your monthly income of $${monthlyIncome.toFixed(2)}`);
-    }
-    
-    if (existingLoans >= 2) {
-      reasons.push(`You have ${existingLoans} existing active loan(s). Maximum allowed is 1`);
-    }
-    
-    if (employmentStatus === 'unemployed') {
-      reasons.push(`Employment status is "${employmentStatus}". Stable employment is required for loan approval`);
-    }
-    
-    if (employmentStatus === 'self-employed' && monthlyIncome < 500) {
-      reasons.push(`Self-employed with monthly income of $${monthlyIncome.toFixed(2)}. Minimum required for self-employed is $500`);
-    }
-    
-    if (riskScore < 50 && riskScore > 0) {
-      reasons.push(`Credit risk score of ${riskScore} is below the minimum threshold of 50`);
-    }
-    
-    if (requestedAmount < 100) {
-      reasons.push(`Loan amount $${requestedAmount.toFixed(2)} is below the minimum of $100`);
-    }
-    if (requestedAmount > 10000) {
-      reasons.push(`Loan amount $${requestedAmount.toFixed(2)} exceeds the maximum of $10,000`);
-    }
-    
-    if (monthlyIncome > 0) {
-      const incomeToLoanRatio = (requestedAmount / monthlyIncome) * 100;
-      if (incomeToLoanRatio > 200) {
-        reasons.push(`Loan amount is ${incomeToLoanRatio.toFixed(0)}% of your monthly income. Maximum allowed is 200%`);
-      }
-    }
-    
-    if (reasons.length === 0) {
-      return `Loan application does not meet our current approval criteria. Risk score: ${riskScore || 'Not calculated'}. Please review your application or contact support.`;
-    }
-    
-    return reasons.join('. ');
+    return buildRejectionAssessment(loan).reasonText;
     
   } catch (error) {
     console.error('Generate rejection reason error:', error);
@@ -495,7 +646,16 @@ const updateLoanStatus = async (req, res) => {
     }
 
     if (status === 'rejected') {
-      decision_reason = await generateRejectionReason(id);
+      const rejectionAssessment = buildRejectionAssessment({
+        ...(await connection.execute(
+          `SELECT l.*, c.monthly_income as client_income
+           FROM loans l
+           JOIN clients c ON l.client_id = c.id
+           WHERE l.id = ?`,
+          [id]
+        ))[0][0],
+      });
+      decision_reason = rejectionAssessment.reasonText;
       
       if (!decision_reason || decision_reason === 'Loan data not found') {
         decision_reason = "Loan does not meet approval criteria based on your financial profile.";
@@ -534,7 +694,10 @@ const updateLoanStatus = async (req, res) => {
     res.json({
       success: true,
       message: message,
-      data: updatedLoan[0]
+      data: {
+        ...updatedLoan[0],
+        affordability: calculateAffordabilityDetails(updatedLoan[0]),
+      }
     });
 
   } catch (error) {
@@ -555,5 +718,6 @@ module.exports = {
   getLoanById,
   getClientLoans,
   updateLoanStatus,
-  generateRejectionReason
+  generateRejectionReason,
+  analyzeEcoCashStatement,
 };

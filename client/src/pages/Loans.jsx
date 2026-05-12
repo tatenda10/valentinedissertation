@@ -7,6 +7,7 @@ function Loans() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [selectedLoan, setSelectedLoan] = useState(null);
+  const [loanDetailsLoading, setLoanDetailsLoading] = useState(false);
 
   useEffect(() => {
     fetchLoans();
@@ -67,6 +68,22 @@ function Loans() {
         return 'bg-red-100 text-red-700';
       default:
         return 'bg-amber-100 text-amber-700';
+    }
+  };
+
+  const openLoanDetails = async (loanId) => {
+    try {
+      setLoanDetailsLoading(true);
+      const response = await axios.get(`${API_URL}/loans/${loanId}`);
+      setSelectedLoan(response.data?.loan || null);
+    } catch (fetchError) {
+      const errorMessage =
+        fetchError.response?.data?.message ||
+        fetchError.message ||
+        'Failed to fetch loan details';
+      setError(errorMessage);
+    } finally {
+      setLoanDetailsLoading(false);
     }
   };
 
@@ -171,11 +188,11 @@ function Loans() {
                     </span>
                   </td>
                   <td className="whitespace-nowrap px-6 py-4 text-right text-sm font-medium">
-                    <button
-                      onClick={() => setSelectedLoan(loan)}
-                      className="text-[#0f4d7a] hover:text-[#011325]"
-                    >
-                      View Details
+                  <button
+                    onClick={() => openLoanDetails(loan.id)}
+                    className="text-[#0f4d7a] hover:text-[#011325]"
+                  >
+                    View Details
                     </button>
                   </td>
                 </tr>
@@ -187,7 +204,7 @@ function Loans() {
 
       {selectedLoan && (
         <div className="fixed inset-0 z-50 bg-black/60 p-4">
-          <div className="mx-auto mt-16 w-full max-w-2xl rounded-2xl border border-slate-200 bg-white p-6 shadow-2xl">
+          <div className="mx-auto mt-10 max-h-[90vh] w-full max-w-4xl overflow-y-auto rounded-2xl border border-slate-200 bg-white p-6 shadow-2xl">
             <div className="mb-4 flex items-center justify-between">
               <h3 className="text-xl font-bold text-slate-900">Loan Details</h3>
               <button
@@ -210,6 +227,9 @@ function Loans() {
               </button>
             </div>
 
+            {loanDetailsLoading ? (
+              <div className="py-12 text-center text-slate-600">Loading loan details...</div>
+            ) : (
             <div className="grid grid-cols-2 gap-4">
               <div className="col-span-2 rounded-xl bg-slate-50 p-4">
                 <h4 className="mb-3 text-sm font-semibold text-slate-800">
@@ -298,6 +318,22 @@ function Loans() {
                   </div>
                   <div>
                     <div className="text-sm font-medium text-slate-500">
+                      Recommended Amount
+                    </div>
+                    <div className="mt-1 text-sm text-slate-900">
+                      {formatCurrency(selectedLoan.recommended_amount || selectedLoan.affordability?.recommendedAmount || 0)}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-sm font-medium text-slate-500">
+                      Max Affordable Loan
+                    </div>
+                    <div className="mt-1 text-sm text-slate-900">
+                      {formatCurrency(selectedLoan.max_affordable_loan || selectedLoan.affordability?.maxAffordableLoan || 0)}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-sm font-medium text-slate-500">
                       Application Date
                     </div>
                     <div className="mt-1 text-sm text-slate-900">
@@ -328,6 +364,41 @@ function Loans() {
                 </div>
               </div>
 
+              {selectedLoan.statement_overview && (
+                <div className="col-span-2 rounded-xl border border-blue-100 bg-blue-50 p-4">
+                  <div className="mb-3 flex items-center justify-between">
+                    <div>
+                      <div className="text-sm font-semibold text-slate-900">EcoCash Statement Summary</div>
+                      <div className="text-sm text-slate-600">Quick breakdown of the uploaded statement we extracted.</div>
+                    </div>
+                    <span className="rounded-full bg-white px-3 py-1 text-xs font-semibold text-blue-700 shadow-sm">
+                      {selectedLoan.statement_overview.statementCount} statement
+                    </span>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
+                    <div className="rounded-xl bg-white p-3 shadow-sm">
+                      <div className="text-xs font-medium uppercase tracking-wide text-slate-500">Transactions</div>
+                      <div className="mt-2 text-xl font-semibold text-slate-900">{selectedLoan.statement_overview.transactionCount}</div>
+                    </div>
+                    <div className="rounded-xl bg-white p-3 shadow-sm">
+                      <div className="text-xs font-medium uppercase tracking-wide text-slate-500">Money In</div>
+                      <div className="mt-2 text-xl font-semibold text-emerald-700">{selectedLoan.statement_overview.moneyInCount}</div>
+                      <div className="text-xs text-slate-500">{formatCurrency(selectedLoan.statement_overview.totalMoneyIn)}</div>
+                    </div>
+                    <div className="rounded-xl bg-white p-3 shadow-sm">
+                      <div className="text-xs font-medium uppercase tracking-wide text-slate-500">Money Out</div>
+                      <div className="mt-2 text-xl font-semibold text-red-700">{selectedLoan.statement_overview.moneyOutCount}</div>
+                      <div className="text-xs text-slate-500">{formatCurrency(selectedLoan.statement_overview.totalMoneyOut)}</div>
+                    </div>
+                    <div className="rounded-xl bg-white p-3 shadow-sm">
+                      <div className="text-xs font-medium uppercase tracking-wide text-slate-500">Est. Monthly Income</div>
+                      <div className="mt-2 text-xl font-semibold text-slate-900">{formatCurrency(selectedLoan.statement_overview.estimatedMonthlyIncome)}</div>
+                    </div>
+                  </div>
+                </div>
+              )}
+
               <div className="col-span-2 rounded-xl bg-slate-50 p-4">
                 <div className="text-sm font-medium text-slate-500">
                   Decision Reason
@@ -337,6 +408,7 @@ function Loans() {
                 </div>
               </div>
             </div>
+            )}
           </div>
         </div>
       )}

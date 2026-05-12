@@ -1,88 +1,142 @@
-// backend/routes/auditRoutes.js
 const express = require('express');
 const router = express.Router();
 const { authenticate, isAdmin } = require('../middleware/auth');
 const { getConnection } = require('../config/database');
 
-// Get all audit logs (Admin only)
+const getAuditSchemaConfig = async (connection) => {
+  const [columns] = await connection.execute('SHOW COLUMNS FROM audit_logs');
+  const fieldNames = new Set(columns.map((column) => column.Field));
+  const usesAdminSchema = fieldNames.has('action') && fieldNames.has('admin_username');
+
+  return {
+    fieldNames,
+    actionColumn: usesAdminSchema ? 'action' : 'action_type',
+    actorLabelColumn: usesAdminSchema
+      ? "COALESCE(admin_username, CONCAT('Admin #', admin_id))"
+      : "COALESCE(CONCAT('User #', user_id), 'System')",
+    detailsColumn: usesAdminSchema ? 'details' : 'action_description',
+    statusColumn: fieldNames.has('status') ? 'status' : null,
+  };
+};
+
+const buildAuditWhereClause = ({ action, date, actorId }, config) => {
+  const conditions = [];
+  const params = [];
+
+  if (action) {
+    conditions.push(`${config.actionColumn} LIKE ?`);
+    params.push(`%${action}%`);
+  }
+
+  if (date) {
+    conditions.push('DATE(created_at) = ?');
+    params.push(date);
+  }
+
+  if (actorId) {
+    const actorColumn = config.fieldNames.has('admin_id') ? 'admin_id' : 'user_id';
+    conditions.push(`${actorColumn} = ?`);
+    params.push(actorId);
+  }
+
+  return {
+    clause: conditions.length ? `WHERE ${conditions.join(' AND ')}` : '',
+    params,
+  };
+};
+
 router.get('/audit-logs', authenticate, isAdmin, async (req, res) => {
   const connection = await getConnection();
-  
+
   try {
-    const { action, date, admin_id, limit = 100 } = req.query;
-    
-    let query = `
-      SELECT al.*, 
-             CONCAT(COALESCE(a.first_name, ''), ' ', COALESCE(a.last_name, '')) as admin_name
-      FROM audit_logs al
-      LEFT JOIN admins a ON al.admin_id = a.id
-      WHERE 1=1
-    `;
-    let params = [];
-    
-    if (action) {
-      query += ` AND al.action LIKE ?`;
-      params.push(`%${action}%`);
-    }
-    
-    if (date) {
-      query += ` AND DATE(al.created_at) = ?`;
-      params.push(date);
-    }
-    
-    if (admin_id) {
-      query += ` AND al.admin_id = ?`;
-      params.push(admin_id);
-    }
-    
-    query += ` ORDER BY al.created_at DESC LIMIT ?`;
-    params.push(parseInt(limit));
-    
-    const [logs] = await connection.execute(query, params);
-    
-    // Get summary stats
-    const [summary] = await connection.execute(`
-      SELECT 
-        COUNT(*) as total,
-        COUNT(DISTINCT admin_id) as unique_admins,
-        SUM(CASE WHEN action = 'LOAN_APPROVED' THEN 1 ELSE 0 END) as total_approvals,
-        SUM(CASE WHEN action = 'LOAN_REJECTED' THEN 1 ELSE 0 END) as total_rejections
-      FROM audit_logs
-    `);
-    
+    const { action, date, admin_id, user_id, limit = 100 } = req.query;
+    const parsedLimit = Math.min(Math.max(parseInt(limit, 10) || 100, 1), 500);
+    const schemaConfig = await getAuditSchemaConfig(connection);
+    const actorId = admin_id || user_id || null;
+    const { clause, params } = buildAuditWhereClause({ action, date, actorId }, schemaConfig);
+
+    const [logs] = await connection.execute(
+      `
+        SELECT
+          id,
+          created_at,
+          ${schemaConfig.actionColumn} AS action,
+          ${schemaConfig.actorLabelColumn} AS actor_name,
+          ${schemaConfig.detailsColumn} AS details,
+          ip_address,
+          entity_type,
+          entity_id,
+          ${schemaConfig.statusColumn ? `${schemaConfig.statusColumn}` : 'NULL'} AS status
+        FROM audit_logs
+        ${clause}
+        ORDER BY created_at DESC
+        LIMIT ?
+      `,
+      [...params, parsedLimit],
+    );
+
+    const [summaryRows] = await connection.execute(
+      `
+        SELECT
+          COUNT(*) AS total,
+          COUNT(DISTINCT ${schemaConfig.fieldNames.has('admin_id') ? 'admin_id' : 'user_id'}) AS unique_actors,
+          SUM(CASE WHEN ${schemaConfig.actionColumn} = 'LOAN_APPROVED' THEN 1 ELSE 0 END) AS total_approvals,
+          SUM(CASE WHEN ${schemaConfig.actionColumn} = 'LOAN_REJECTED' THEN 1 ELSE 0 END) AS total_rejections
+        FROM audit_logs
+        ${clause}
+      `,
+      params,
+    );
+
     res.json({
       success: true,
-      logs: logs,
-      summary: summary[0]
+      logs,
+      summary: summaryRows[0] || {
+        total: 0,
+        unique_actors: 0,
+        total_approvals: 0,
+        total_rejections: 0,
+      },
     });
-    
   } catch (error) {
     console.error('Get audit logs error:', error);
-    res.status(500).json({ message: 'Server error', error: error.message });
+    res.status(500).json({ message: 'Server error while fetching audit logs', error: error.message });
   } finally {
     connection.release();
   }
 });
 
-// Get single audit log by ID
 router.get('/audit-logs/:id', authenticate, isAdmin, async (req, res) => {
   const connection = await getConnection();
-  
+
   try {
-    const { id } = req.params;
+    const schemaConfig = await getAuditSchemaConfig(connection);
     const [logs] = await connection.execute(
-      `SELECT * FROM audit_logs WHERE id = ?`,
-      [id]
+      `
+        SELECT
+          id,
+          created_at,
+          ${schemaConfig.actionColumn} AS action,
+          ${schemaConfig.actorLabelColumn} AS actor_name,
+          ${schemaConfig.detailsColumn} AS details,
+          ip_address,
+          entity_type,
+          entity_id,
+          ${schemaConfig.statusColumn ? `${schemaConfig.statusColumn}` : 'NULL'} AS status
+        FROM audit_logs
+        WHERE id = ?
+      `,
+      [req.params.id],
     );
-    
-    if (logs.length === 0) {
+
+    if (!logs.length) {
       return res.status(404).json({ message: 'Audit log not found' });
     }
-    
+
     res.json({ log: logs[0] });
   } catch (error) {
     console.error('Get audit log error:', error);
-    res.status(500).json({ message: 'Server error' });
+    res.status(500).json({ message: 'Server error while fetching audit log', error: error.message });
   } finally {
     connection.release();
   }

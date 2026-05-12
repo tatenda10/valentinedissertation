@@ -24,3 +24,12 @@ body::-webkit-scrollbar {
 * {
   box-sizing: border-box;
 }
+
+.register-scroll {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.register-scroll::-webkit-scrollbar {
+  display: none;
+}

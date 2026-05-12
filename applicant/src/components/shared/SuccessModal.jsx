@@ -34,7 +34,7 @@ const SuccessModal = ({ isOpen, message, onClose }) => {
               </svg>
             </div>
             <div className="ml-4">
-              <p className="text-sm text-gray-500">{message}</p>
+              <div className="text-sm whitespace-pre-line text-gray-500">{message}</div>
             </div>
           </div>
         </div>

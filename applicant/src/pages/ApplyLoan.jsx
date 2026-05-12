@@ -46,6 +46,13 @@ const ApplyLoan = () => {
 
   const inputClassName = 'mt-1 block w-full rounded-xl border border-slate-300 bg-white px-3 py-2.5 text-sm text-slate-800 shadow-sm outline-none transition focus:border-[#0f4d7a] focus:ring-2 focus:ring-[#0f4d7a]/20';
 
+  const formatCurrency = (amount) =>
+    new Intl.NumberFormat('en-US', {
+      style: 'currency',
+      currency: 'USD',
+      maximumFractionDigits: 2,
+    }).format(Number(amount) || 0);
+
   const handleChange = (e) => {
     const { name, value } = e.target;
     setFormData(prev => ({
@@ -149,13 +156,27 @@ const ApplyLoan = () => {
       const response = await axios.post(`${API_URL}/loans/submit-with-pdf`, submitFormData, {
         headers: { 'Content-Type': 'multipart/form-data' }
       });
-      
-      setSuccessMessage(response.data.message || 'Loan application submitted successfully!');
+
+      const overview = response.data?.statementOverview || response.data?.statementAnalysis?.summary;
+      const summaryLines = overview
+        ? [
+            response.data.message || 'Loan application submitted successfully!',
+            '',
+            'EcoCash brief:',
+            `Statements analysed: ${response.data?.statementOverview?.statementCount || 1}`,
+            `Transactions extracted: ${overview.transactionCount || 0}`,
+            `Money in: ${overview.moneyInCount || overview.depositCount || 0} transactions worth ${formatCurrency(overview.totalMoneyIn || overview.totalDeposits)}`,
+            `Money out: ${overview.moneyOutCount || overview.withdrawalCount || 0} transactions worth ${formatCurrency(overview.totalMoneyOut || overview.totalWithdrawals)}`,
+            `Estimated monthly income: ${formatCurrency(overview.estimatedMonthlyIncome)}`,
+          ].join('\n')
+        : response.data.message || 'Loan application submitted successfully!';
+
+      setSuccessMessage(summaryLines);
       setShowSuccessModal(true);
       
       setTimeout(() => {
         navigate('/dashboard');
-      }, 1500);
+      }, 3000);
     } catch (error) {
       const errorMessage = error.response?.data?.message || error.message || 'Failed to submit loan application';
       setError(errorMessage);
