@@ -456,14 +456,14 @@ router.get('/reports/monthly', authenticate, isAdmin, async (req, res) => {
     try {
         const [data] = await connection.execute(`
             SELECT 
-                DATE_FORMAT(application_date, '%b') as month,
+                DATE_FORMAT(MIN(application_date), '%b') as month,
                 COUNT(*) as loans,
                 SUM(CASE WHEN status = 'approved' THEN 1 ELSE 0 END) as approved,
                 SUM(CASE WHEN status = 'rejected' THEN 1 ELSE 0 END) as rejected
             FROM loans
             WHERE application_date >= DATE_SUB(NOW(), INTERVAL 6 MONTH)
             GROUP BY YEAR(application_date), MONTH(application_date)
-            ORDER BY application_date ASC
+            ORDER BY YEAR(application_date) ASC, MONTH(application_date) ASC
         `);
         res.json(data);
     } catch (error) {

@@ -70,9 +70,9 @@ router.get('/audit-logs', authenticate, isAdmin, async (req, res) => {
         FROM audit_logs
         ${clause}
         ORDER BY created_at DESC
-        LIMIT ?
+        LIMIT ${parsedLimit}
       `,
-      [...params, parsedLimit],
+      params,
     );
 
     const [summaryRows] = await connection.execute(
