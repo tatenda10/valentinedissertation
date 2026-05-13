@@ -1,5 +1,6 @@
 const { getConnection } = require('../../config/database');
 const fs = require('fs');
+const path = require('path');
 const { logAudit } = require('../../utils/auditLogger');
 const { analyzeStatement, scoreLoanApplication } = require('../../services/mlLoanScoring');
 
@@ -269,16 +270,44 @@ const buildRepaymentSummary = (loan, repayments = [], aggregate = null) => {
   };
 };
 
+const buildPaymentSchedule = (loan, summary = null) => {
+  const repaymentSummary = summary || buildRepaymentSummary(loan, []);
+  const totalInstallments = Math.max(Number(repaymentSummary.totalInstallments || loan?.duration || 0), 0);
+  const monthlyInstallment = roundCurrency(repaymentSummary.monthlyInstallment || loan?.monthly_payment || 0);
+  const scheduleBaseDate = loan?.decision_date || loan?.application_date;
+  const rows = [];
+
+  for (let index = 0; index < totalInstallments; index += 1) {
+    const installmentNumber = index + 1;
+    const dueDate = addMonths(scheduleBaseDate, installmentNumber);
+    rows.push({
+      installmentNumber,
+      dueDate: dueDate ? dueDate.toISOString() : null,
+      amount: monthlyInstallment,
+      status:
+        installmentNumber <= Number(repaymentSummary.installmentsPaid || 0)
+          ? 'paid'
+          : String(loan?.status || '').toLowerCase() === 'approved'
+            ? 'upcoming'
+            : 'pending',
+    });
+  }
+
+  return rows;
+};
+
 const enrichLoanRecord = async (connection, loan, { includeStatementAnalysis = false } = {}) => {
   const rejectionAssessment = buildRejectionAssessment(loan);
   const repayments = await fetchLoanRepayments(connection, loan.id).catch(() => []);
+  const repaymentSummary = buildRepaymentSummary(loan, repayments);
   const enrichedLoan = {
     ...loan,
     affordability: rejectionAssessment.affordability,
     recommended_amount: rejectionAssessment.affordability.recommendedAmount,
     max_affordable_loan: rejectionAssessment.affordability.maxAffordableLoan,
     repayment_history: repayments,
-    repayment_summary: buildRepaymentSummary(loan, repayments),
+    repayment_summary: repaymentSummary,
+    payment_schedule: buildPaymentSchedule(loan, repaymentSummary),
   };
 
   if (includeStatementAnalysis && loan?.statement_path) {
@@ -546,14 +575,18 @@ const getAllLoans = async (req, res) => {
       loans.map((loan) => loan.id),
     );
 
-    const enrichedLoans = loans.map((loan) => ({
-      ...loan,
-      affordability: calculateAffordabilityDetails(loan),
-      recommended_amount: buildRejectionAssessment(loan).affordability.recommendedAmount,
-      max_affordable_loan: buildRejectionAssessment(loan).affordability.maxAffordableLoan,
-      repayment_summary: buildRepaymentSummary(loan, [], repaymentTotalsMap.get(loan.id) || null),
-      repayment_count: Number(repaymentTotalsMap.get(loan.id)?.repaymentCount || 0),
-    }));
+    const enrichedLoans = loans.map((loan) => {
+      const repaymentSummary = buildRepaymentSummary(loan, [], repaymentTotalsMap.get(loan.id) || null);
+      return {
+        ...loan,
+        affordability: calculateAffordabilityDetails(loan),
+        recommended_amount: buildRejectionAssessment(loan).affordability.recommendedAmount,
+        max_affordable_loan: buildRejectionAssessment(loan).affordability.maxAffordableLoan,
+        repayment_summary: repaymentSummary,
+        payment_schedule: buildPaymentSchedule(loan, repaymentSummary),
+        repayment_count: Number(repaymentTotalsMap.get(loan.id)?.repaymentCount || 0),
+      };
+    });
 
     res.json({ loans: enrichedLoans });
 
@@ -693,14 +726,18 @@ const getClientLoans = async (req, res) => {
       totalAmount: loans.reduce((sum, l) => sum + parseFloat(l.amount || 0), 0)
     };
 
-    const enrichedLoans = loans.map((loan) => ({
-      ...loan,
-      affordability: calculateAffordabilityDetails(loan),
-      recommended_amount: buildRejectionAssessment(loan).affordability.recommendedAmount,
-      max_affordable_loan: buildRejectionAssessment(loan).affordability.maxAffordableLoan,
-      repayment_summary: buildRepaymentSummary(loan, [], repaymentTotalsMap.get(loan.id) || null),
-      repayment_count: Number(repaymentTotalsMap.get(loan.id)?.repaymentCount || 0),
-    }));
+    const enrichedLoans = loans.map((loan) => {
+      const repaymentSummary = buildRepaymentSummary(loan, [], repaymentTotalsMap.get(loan.id) || null);
+      return {
+        ...loan,
+        affordability: calculateAffordabilityDetails(loan),
+        recommended_amount: buildRejectionAssessment(loan).affordability.recommendedAmount,
+        max_affordable_loan: buildRejectionAssessment(loan).affordability.maxAffordableLoan,
+        repayment_summary: repaymentSummary,
+        payment_schedule: buildPaymentSchedule(loan, repaymentSummary),
+        repayment_count: Number(repaymentTotalsMap.get(loan.id)?.repaymentCount || 0),
+      };
+    });
 
     res.json({ loans: enrichedLoans, summary });
 
@@ -881,6 +918,7 @@ const getLoanRepayments = async (req, res) => {
     res.json({
       repayments,
       summary: buildRepaymentSummary(loan, repayments),
+      schedule: buildPaymentSchedule(loan, buildRepaymentSummary(loan, repayments)),
     });
   } catch (error) {
     console.error('Get loan repayments error:', error);
@@ -936,6 +974,8 @@ const recordRepayment = async (req, res) => {
       req.user?.userId || null,
     );
 
+    const proofOfPaymentPath = req.file ? req.file.path : null;
+
     await connection.execute(
       `INSERT INTO loan_repayments (
           loan_id,
@@ -943,15 +983,17 @@ const recordRepayment = async (req, res) => {
           payment_date,
           payment_method,
           reference_note,
+          proof_of_payment_path,
           recorded_by_user_id,
           created_at
-       ) VALUES (?, ?, ?, ?, ?, ?, NOW())`,
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, NOW())`,
       [
         id,
         amountPaid,
         normalizedPaymentDate,
         toNullableValue(payment_method),
         toNullableValue(reference_note),
+        toNullableValue(proofOfPaymentPath),
         recordedByUserId,
       ],
     );
@@ -971,10 +1013,66 @@ const recordRepayment = async (req, res) => {
       message: 'Repayment recorded successfully',
       repayments,
       summary: buildRepaymentSummary(loan, repayments),
+      schedule: buildPaymentSchedule(loan, buildRepaymentSummary(loan, repayments)),
     });
   } catch (error) {
     console.error('Record repayment error:', error);
     res.status(500).json({ message: 'Server error while recording repayment', error: error.message });
+  } finally {
+    connection.release();
+  }
+};
+
+const viewRepaymentProof = async (req, res) => {
+  const connection = await getConnection();
+
+  try {
+    const { filename } = req.params;
+
+    if (filename.includes('..') || filename.includes('/') || filename.includes('\\')) {
+      return res.status(403).json({ message: 'Invalid filename' });
+    }
+
+    const [rows] = await connection.execute(
+      `SELECT
+          lr.proof_of_payment_path,
+          l.client_id
+       FROM loan_repayments lr
+       JOIN loans l ON l.id = lr.loan_id
+       WHERE lr.proof_of_payment_path LIKE ?
+       LIMIT 1`,
+      [`%${filename}`],
+    );
+
+    if (!rows.length || !rows[0].proof_of_payment_path) {
+      return res.status(404).json({ message: 'Proof of payment not found' });
+    }
+
+    const isAdminUser = (req.user?.roles || []).some((role) => String(role).toLowerCase() === 'admin');
+    if (!isAdminUser && Number(rows[0].client_id) !== Number(req.user?.userId)) {
+      return res.status(403).json({ message: 'You can only access proof files for your own loans' });
+    }
+
+    const proofPath = path.resolve(rows[0].proof_of_payment_path);
+    if (!fs.existsSync(proofPath)) {
+      return res.status(404).json({ message: 'Proof file is missing from storage' });
+    }
+
+    const extension = path.extname(proofPath).toLowerCase();
+    const contentTypeMap = {
+      '.pdf': 'application/pdf',
+      '.jpg': 'image/jpeg',
+      '.jpeg': 'image/jpeg',
+      '.png': 'image/png',
+      '.webp': 'image/webp',
+    };
+
+    res.setHeader('Content-Type', contentTypeMap[extension] || 'application/octet-stream');
+    res.setHeader('Content-Disposition', `inline; filename="${path.basename(proofPath)}"`);
+    res.sendFile(proofPath);
+  } catch (error) {
+    console.error('View repayment proof error:', error);
+    res.status(500).json({ message: 'Server error while loading proof of payment', error: error.message });
   } finally {
     connection.release();
   }
@@ -992,6 +1090,7 @@ module.exports = {
   updateLoanStatus,
   getLoanRepayments,
   recordRepayment,
+  viewRepaymentProof,
   generateRejectionReason,
   analyzeEcoCashStatement,
 };

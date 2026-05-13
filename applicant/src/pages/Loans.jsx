@@ -9,10 +9,12 @@ const LoanModal = ({ loan, isOpen, onClose, onRepaymentRecorded }) => {
     payment_method: '',
     payment_date: new Date().toISOString().slice(0, 10),
     reference_note: '',
+    proof_of_payment: null,
   });
   const [submittingRepayment, setSubmittingRepayment] = useState(false);
   const [repaymentError, setRepaymentError] = useState('');
   const [repaymentSuccess, setRepaymentSuccess] = useState('');
+  const [openingProofPath, setOpeningProofPath] = useState('');
 
   useEffect(() => {
     if (!loan || !isOpen) {
@@ -24,9 +26,11 @@ const LoanModal = ({ loan, isOpen, onClose, onRepaymentRecorded }) => {
       payment_method: '',
       payment_date: new Date().toISOString().slice(0, 10),
       reference_note: '',
+      proof_of_payment: null,
     });
     setRepaymentError('');
     setRepaymentSuccess('');
+    setOpeningProofPath('');
   }, [loan, isOpen]);
 
   if (!isOpen || !loan) return null;
@@ -41,8 +45,41 @@ const LoanModal = ({ loan, isOpen, onClose, onRepaymentRecorded }) => {
   const formatDate = (value) =>
     value ? new Date(value).toLocaleDateString() : '-';
 
+  const getProofFilename = (proofPath) => {
+    if (!proofPath) {
+      return '';
+    }
+
+    const parts = String(proofPath).split(/[/\\]/);
+    return parts[parts.length - 1] || '';
+  };
+
   const repaymentSummary = loan.repayment_summary || {};
+  const paymentSchedule = loan.payment_schedule || [];
   const canRepay = String(loan.status || '').toLowerCase() === 'approved';
+
+  const handleProofView = async (proofPath) => {
+    const filename = getProofFilename(proofPath);
+    if (!filename) {
+      return;
+    }
+
+    try {
+      setOpeningProofPath(proofPath);
+      const response = await axios.get(`${API_URL}/loans/repayment-proof/${filename}`, {
+        responseType: 'blob',
+      });
+      const fileUrl = window.URL.createObjectURL(response.data);
+      window.open(fileUrl, '_blank', 'noopener,noreferrer');
+      window.setTimeout(() => window.URL.revokeObjectURL(fileUrl), 60_000);
+    } catch (error) {
+      setRepaymentError(
+        error.response?.data?.message || error.message || 'Failed to open proof of payment.',
+      );
+    } finally {
+      setOpeningProofPath('');
+    }
+  };
 
   const handleRepaymentSubmit = async (event) => {
     event.preventDefault();
@@ -56,7 +93,21 @@ const LoanModal = ({ loan, isOpen, onClose, onRepaymentRecorded }) => {
 
     try {
       setSubmittingRepayment(true);
-      await axios.post(`${API_URL}/loans/${loan.id}/repayments`, repaymentForm);
+      const submitData = new FormData();
+      submitData.append('amount', repaymentForm.amount);
+      submitData.append('payment_date', repaymentForm.payment_date);
+      submitData.append('payment_method', repaymentForm.payment_method);
+      submitData.append('reference_note', repaymentForm.reference_note);
+
+      if (repaymentForm.proof_of_payment) {
+        submitData.append('proof_of_payment', repaymentForm.proof_of_payment);
+      }
+
+      await axios.post(`${API_URL}/loans/${loan.id}/repayments`, submitData, {
+        headers: {
+          'Content-Type': 'multipart/form-data',
+        },
+      });
       setRepaymentSuccess('Repayment submitted successfully.');
 
       if (onRepaymentRecorded) {
@@ -67,6 +118,7 @@ const LoanModal = ({ loan, isOpen, onClose, onRepaymentRecorded }) => {
         ...current,
         amount: '',
         reference_note: '',
+        proof_of_payment: null,
       }));
     } catch (error) {
       setRepaymentError(
@@ -79,7 +131,7 @@ const LoanModal = ({ loan, isOpen, onClose, onRepaymentRecorded }) => {
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
-      <div className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-2xl border border-slate-200 bg-white shadow-2xl">
+      <div className="max-h-[90vh] w-full max-w-5xl overflow-y-auto rounded-2xl border border-slate-200 bg-white shadow-2xl">
         <div className="p-6">
           <div className="mb-6 flex items-center justify-between">
             <h3 className="text-xl font-bold text-slate-900">Loan Details</h3>
@@ -90,7 +142,7 @@ const LoanModal = ({ loan, isOpen, onClose, onRepaymentRecorded }) => {
             </button>
           </div>
 
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
             <div>
               <p className="text-sm font-medium text-slate-500">Applicant</p>
               <p className="mt-1">{`${loan.first_name} ${loan.last_name}`}</p>
@@ -158,101 +210,172 @@ const LoanModal = ({ loan, isOpen, onClose, onRepaymentRecorded }) => {
             </div>
           </div>
 
-          <div className="mt-8 rounded-2xl border border-slate-200 bg-slate-50 p-5">
-            <div className="flex items-center justify-between gap-4">
+          <div className="mt-8 grid grid-cols-1 gap-6 xl:grid-cols-[1.1fr_0.9fr]">
+            <div className="rounded-2xl border border-slate-200 bg-white p-5">
               <div>
-                <h4 className="text-lg font-semibold text-slate-900">Make a Repayment</h4>
+                <h4 className="text-lg font-semibold text-slate-900">Payment Schedule</h4>
                 <p className="mt-1 text-sm text-slate-600">
-                  Submit a repayment for this loan from your applicant account.
+                  Expected installment dates and amounts for this loan.
                 </p>
               </div>
-              <div className="rounded-full bg-white px-3 py-1 text-xs font-semibold text-slate-700 shadow-sm">
-                {Math.min(Number(repaymentSummary.progressPercent || 0), 100)}% paid
+
+              <div className="mt-5 overflow-x-auto">
+                <table className="min-w-full divide-y divide-slate-200">
+                  <thead className="bg-slate-50">
+                    <tr>
+                      <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-500">Installment</th>
+                      <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-500">Due Date</th>
+                      <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-500">Amount</th>
+                      <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-500">Status</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 bg-white">
+                    {paymentSchedule.length ? (
+                      paymentSchedule.map((scheduleItem) => (
+                        <tr key={`${scheduleItem.installmentNumber}-${scheduleItem.dueDate || 'pending'}`}>
+                          <td className="px-4 py-3 text-sm font-medium text-slate-900">#{scheduleItem.installmentNumber}</td>
+                          <td className="px-4 py-3 text-sm text-slate-700">{formatDate(scheduleItem.dueDate)}</td>
+                          <td className="px-4 py-3 text-sm text-slate-700">{formatCurrency(scheduleItem.amount)}</td>
+                          <td className="px-4 py-3 text-sm">
+                            <span
+                              className={`inline-flex rounded-full px-2.5 py-1 text-xs font-semibold capitalize ${
+                                scheduleItem.status === 'paid'
+                                  ? 'bg-emerald-100 text-emerald-700'
+                                  : scheduleItem.status === 'upcoming'
+                                    ? 'bg-blue-100 text-blue-700'
+                                    : 'bg-amber-100 text-amber-700'
+                              }`}
+                            >
+                              {scheduleItem.status}
+                            </span>
+                          </td>
+                        </tr>
+                      ))
+                    ) : (
+                      <tr>
+                        <td colSpan="4" className="px-4 py-5 text-center text-sm text-slate-500">
+                          No payment schedule is available for this loan yet.
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
               </div>
             </div>
 
-            {!canRepay ? (
-              <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
-                Repayments are available only after a loan has been approved.
+            <div className="rounded-2xl border border-slate-200 bg-slate-50 p-5">
+              <div className="flex items-center justify-between gap-4">
+                <div>
+                  <h4 className="text-lg font-semibold text-slate-900">Repayment Option</h4>
+                  <p className="mt-1 text-sm text-slate-600">
+                    Submit a repayment and attach proof of payment from your applicant account.
+                  </p>
+                </div>
+                <div className="rounded-full bg-white px-3 py-1 text-xs font-semibold text-slate-700 shadow-sm">
+                  {Math.min(Number(repaymentSummary.progressPercent || 0), 100)}% paid
+                </div>
               </div>
-            ) : (
-              <form onSubmit={handleRepaymentSubmit} className="mt-5 space-y-4">
-                <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-                  <div>
-                    <label className="block text-sm font-medium text-slate-600">Amount</label>
-                    <input
-                      type="number"
-                      min="0.01"
-                      step="0.01"
-                      value={repaymentForm.amount}
-                      onChange={(event) => setRepaymentForm((current) => ({ ...current, amount: event.target.value }))}
-                      className="mt-2 w-full rounded-xl border border-slate-200 px-3 py-2.5 text-sm text-slate-700 outline-none transition focus:border-[#0f4d7a] focus:ring-2 focus:ring-[#0f4d7a]/20"
-                      placeholder="Enter repayment amount"
-                      required
-                    />
+
+              {!canRepay ? (
+                <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+                  Repayments are available only after a loan has been approved.
+                </div>
+              ) : (
+                <form onSubmit={handleRepaymentSubmit} className="mt-5 space-y-4">
+                  <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                    <div>
+                      <label className="block text-sm font-medium text-slate-600">Amount</label>
+                      <input
+                        type="number"
+                        min="0.01"
+                        step="0.01"
+                        value={repaymentForm.amount}
+                        onChange={(event) => setRepaymentForm((current) => ({ ...current, amount: event.target.value }))}
+                        className="mt-2 w-full rounded-xl border border-slate-200 px-3 py-2.5 text-sm text-slate-700 outline-none transition focus:border-[#0f4d7a] focus:ring-2 focus:ring-[#0f4d7a]/20"
+                        placeholder="Enter repayment amount"
+                        required
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-slate-600">Payment Date</label>
+                      <input
+                        type="date"
+                        value={repaymentForm.payment_date}
+                        onChange={(event) => setRepaymentForm((current) => ({ ...current, payment_date: event.target.value }))}
+                        className="mt-2 w-full rounded-xl border border-slate-200 px-3 py-2.5 text-sm text-slate-700 outline-none transition focus:border-[#0f4d7a] focus:ring-2 focus:ring-[#0f4d7a]/20"
+                        required
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-slate-600">Payment Method</label>
+                      <select
+                        value={repaymentForm.payment_method}
+                        onChange={(event) => setRepaymentForm((current) => ({ ...current, payment_method: event.target.value }))}
+                        className="mt-2 w-full rounded-xl border border-slate-200 px-3 py-2.5 text-sm text-slate-700 outline-none transition focus:border-[#0f4d7a] focus:ring-2 focus:ring-[#0f4d7a]/20"
+                      >
+                        <option value="">Select a method</option>
+                        <option value="ecocash">EcoCash</option>
+                        <option value="bank_transfer">Bank transfer</option>
+                        <option value="cash">Cash</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-slate-600">Reference Note</label>
+                      <input
+                        type="text"
+                        value={repaymentForm.reference_note}
+                        onChange={(event) => setRepaymentForm((current) => ({ ...current, reference_note: event.target.value }))}
+                        className="mt-2 w-full rounded-xl border border-slate-200 px-3 py-2.5 text-sm text-slate-700 outline-none transition focus:border-[#0f4d7a] focus:ring-2 focus:ring-[#0f4d7a]/20"
+                        placeholder="Receipt number or note"
+                      />
+                    </div>
+                    <div className="md:col-span-2">
+                      <label className="block text-sm font-medium text-slate-600">Proof of Payment</label>
+                      <input
+                        type="file"
+                        accept=".pdf,.jpg,.jpeg,.png,.webp"
+                        onChange={(event) =>
+                          setRepaymentForm((current) => ({
+                            ...current,
+                            proof_of_payment: event.target.files?.[0] || null,
+                          }))
+                        }
+                        className="mt-2 block w-full rounded-xl border border-slate-200 px-3 py-2.5 text-sm text-slate-700 file:mr-4 file:rounded-lg file:border-0 file:bg-slate-100 file:px-3 file:py-2 file:text-sm file:font-medium file:text-slate-700 hover:file:bg-slate-200"
+                      />
+                      <p className="mt-2 text-xs text-slate-500">
+                        Upload a receipt, screenshot, or PDF confirmation. Accepted formats: PDF, JPG, PNG, WEBP.
+                      </p>
+                    </div>
                   </div>
-                  <div>
-                    <label className="block text-sm font-medium text-slate-600">Payment Date</label>
-                    <input
-                      type="date"
-                      value={repaymentForm.payment_date}
-                      onChange={(event) => setRepaymentForm((current) => ({ ...current, payment_date: event.target.value }))}
-                      className="mt-2 w-full rounded-xl border border-slate-200 px-3 py-2.5 text-sm text-slate-700 outline-none transition focus:border-[#0f4d7a] focus:ring-2 focus:ring-[#0f4d7a]/20"
-                      required
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-slate-600">Payment Method</label>
-                    <select
-                      value={repaymentForm.payment_method}
-                      onChange={(event) => setRepaymentForm((current) => ({ ...current, payment_method: event.target.value }))}
-                      className="mt-2 w-full rounded-xl border border-slate-200 px-3 py-2.5 text-sm text-slate-700 outline-none transition focus:border-[#0f4d7a] focus:ring-2 focus:ring-[#0f4d7a]/20"
+
+                  {repaymentError ? (
+                    <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+                      {repaymentError}
+                    </div>
+                  ) : null}
+
+                  {repaymentSuccess ? (
+                    <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">
+                      {repaymentSuccess}
+                    </div>
+                  ) : null}
+
+                  <div className="flex justify-end">
+                    <button
+                      type="submit"
+                      disabled={submittingRepayment}
+                      className="rounded-xl bg-[#0f4d7a] px-4 py-2.5 text-sm font-medium text-white transition hover:bg-[#0b3e62] disabled:cursor-not-allowed disabled:opacity-60"
                     >
-                      <option value="">Select a method</option>
-                      <option value="ecocash">EcoCash</option>
-                      <option value="bank_transfer">Bank transfer</option>
-                      <option value="cash">Cash</option>
-                    </select>
+                      {submittingRepayment ? 'Submitting...' : 'Submit Repayment'}
+                    </button>
                   </div>
-                  <div>
-                    <label className="block text-sm font-medium text-slate-600">Reference Note</label>
-                    <input
-                      type="text"
-                      value={repaymentForm.reference_note}
-                      onChange={(event) => setRepaymentForm((current) => ({ ...current, reference_note: event.target.value }))}
-                      className="mt-2 w-full rounded-xl border border-slate-200 px-3 py-2.5 text-sm text-slate-700 outline-none transition focus:border-[#0f4d7a] focus:ring-2 focus:ring-[#0f4d7a]/20"
-                      placeholder="Receipt number or note"
-                    />
-                  </div>
-                </div>
-
-                {repaymentError ? (
-                  <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
-                    {repaymentError}
-                  </div>
-                ) : null}
-
-                {repaymentSuccess ? (
-                  <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">
-                    {repaymentSuccess}
-                  </div>
-                ) : null}
-
-                <div className="flex justify-end">
-                  <button
-                    type="submit"
-                    disabled={submittingRepayment}
-                    className="rounded-xl bg-[#0f4d7a] px-4 py-2.5 text-sm font-medium text-white transition hover:bg-[#0b3e62] disabled:cursor-not-allowed disabled:opacity-60"
-                  >
-                    {submittingRepayment ? 'Submitting...' : 'Submit Repayment'}
-                  </button>
-                </div>
-              </form>
-            )}
+                </form>
+              )}
+            </div>
           </div>
 
           <div className="mt-8">
-            <h4 className="text-lg font-semibold text-slate-900">Repayment History</h4>
+            <h4 className="text-lg font-semibold text-slate-900">Payment History</h4>
             <div className="mt-4 overflow-x-auto">
               <table className="min-w-full divide-y divide-slate-200">
                 <thead className="bg-slate-50">
@@ -261,6 +384,7 @@ const LoanModal = ({ loan, isOpen, onClose, onRepaymentRecorded }) => {
                     <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-500">Amount</th>
                     <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-500">Method</th>
                     <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-500">Reference</th>
+                    <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-500">Proof</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100 bg-white">
@@ -271,11 +395,25 @@ const LoanModal = ({ loan, isOpen, onClose, onRepaymentRecorded }) => {
                         <td className="px-4 py-3 text-sm font-medium text-slate-900">{formatCurrency(repayment.amount_paid)}</td>
                         <td className="px-4 py-3 text-sm text-slate-600">{repayment.payment_method || '-'}</td>
                         <td className="px-4 py-3 text-sm text-slate-600">{repayment.reference_note || '-'}</td>
+                        <td className="px-4 py-3 text-sm text-slate-600">
+                          {repayment.proof_of_payment_path ? (
+                            <button
+                              type="button"
+                              disabled={openingProofPath === repayment.proof_of_payment_path}
+                              onClick={() => handleProofView(repayment.proof_of_payment_path)}
+                              className="font-medium text-[#0f4d7a] hover:text-[#011325] disabled:cursor-not-allowed disabled:opacity-60"
+                            >
+                              {openingProofPath === repayment.proof_of_payment_path ? 'Opening...' : 'View proof'}
+                            </button>
+                          ) : (
+                            '-'
+                          )}
+                        </td>
                       </tr>
                     ))
                   ) : (
                     <tr>
-                      <td colSpan="4" className="px-4 py-5 text-center text-sm text-slate-500">No repayments have been recorded yet.</td>
+                      <td colSpan="5" className="px-4 py-5 text-center text-sm text-slate-500">No repayments have been recorded yet.</td>
                     </tr>
                   )}
                 </tbody>
@@ -296,6 +434,7 @@ const Loans = () => {
   const [error, setError] = useState('');
   const [selectedLoan, setSelectedLoan] = useState(null);
   const [isModalOpen, setIsModalOpen] = useState(false);
+  const [openingLoanId, setOpeningLoanId] = useState(null);
 
   useEffect(() => {
     fetchLoans();
@@ -343,7 +482,7 @@ const Loans = () => {
     <div className="mx-auto max-w-7xl space-y-6">
       <section className="rounded-2xl bg-gradient-to-r from-[#011325] via-[#0b2f4f] to-[#114974] p-6 text-white shadow-xl">
         <h1 className="text-2xl font-semibold">My Loans</h1>
-        <p className="mt-2 text-sm text-slate-200">Review your applications and inspect each decision in detail.</p>
+        <p className="mt-2 text-sm text-slate-200">Review your applications, check repayment schedules, and submit proof-backed repayments.</p>
       </section>
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
@@ -391,16 +530,20 @@ const Loans = () => {
                   <button
                     onClick={async () => {
                       try {
+                        setOpeningLoanId(loan.id);
                         const detailedLoan = await fetchLoanDetails(loan.id);
                         setSelectedLoan(detailedLoan || loan);
                         setIsModalOpen(true);
                       } catch (fetchError) {
                         setError(fetchError.response?.data?.message || 'Failed to fetch loan details');
+                      } finally {
+                        setOpeningLoanId(null);
                       }
                     }}
-                    className="text-[#0f4d7a] hover:text-[#011325]"
+                    disabled={openingLoanId === loan.id}
+                    className="text-[#0f4d7a] hover:text-[#011325] disabled:cursor-not-allowed disabled:opacity-60"
                   >
-                    View
+                    {openingLoanId === loan.id ? 'Opening...' : 'View & Repay'}
                   </button>
                 </td>
               </tr>

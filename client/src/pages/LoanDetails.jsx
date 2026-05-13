@@ -9,6 +9,7 @@ const LoanDetails = () => {
   const [loan, setLoan] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [viewingStatement, setViewingStatement] = useState(false);
 
   useEffect(() => {
     const fetchLoanDetails = async () => {
@@ -54,14 +55,21 @@ const LoanDetails = () => {
     return 'bg-amber-100 text-amber-700';
   };
 
-  const viewPDF = () => {
+  const viewPDF = async () => {
     if (!loan?.statement_path) {
       window.alert('No PDF statement was uploaded for this loan.');
       return;
     }
 
     const filename = loan.statement_path.split(/[/\\]/).pop();
-    window.open(`${API_URL}/loans/pdf/${filename}`, '_blank');
+    try {
+      setViewingStatement(true);
+      window.open(`${API_URL}/loans/pdf/${filename}`, '_blank');
+    } finally {
+      window.setTimeout(() => {
+        setViewingStatement(false);
+      }, 1200);
+    }
   };
 
   if (loading) {
@@ -179,9 +187,10 @@ const LoanDetails = () => {
             <button
               type="button"
               onClick={viewPDF}
-              className="rounded-xl bg-[#0f4d7a] px-4 py-2.5 text-sm font-medium text-white transition hover:bg-[#0b3e62]"
+              disabled={viewingStatement}
+              className="rounded-xl bg-[#0f4d7a] px-4 py-2.5 text-sm font-medium text-white transition hover:bg-[#0b3e62] disabled:cursor-not-allowed disabled:opacity-60"
             >
-              View Uploaded Statement
+              {viewingStatement ? 'Opening...' : 'View Uploaded Statement'}
             </button>
           </div>
         </div>

@@ -3,6 +3,7 @@ const router = express.Router();
 const { authenticate, isAdmin, isClient } = require('../middleware/auth');
 const LoansController = require('../controllers/loans/LoansController');
 const upload = require('../middleware/upload');
+const repaymentProofUpload = require('../middleware/repaymentProofUpload');
 
 /**
  * @swagger
@@ -599,7 +600,9 @@ router.get('/:id', authenticate, LoansController.getLoanById);
 
 router.get('/:id/repayments', authenticate, LoansController.getLoanRepayments);
 
-router.post('/:id/repayments', authenticate, LoansController.recordRepayment);
+router.get('/repayment-proof/:filename', authenticate, LoansController.viewRepaymentProof);
+
+router.post('/:id/repayments', authenticate, repaymentProofUpload.single('proof_of_payment'), LoansController.recordRepayment);
 
 /**
  * @swagger

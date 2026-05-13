@@ -8,6 +8,7 @@ function Loans() {
   const [error, setError] = useState('');
   const [selectedLoan, setSelectedLoan] = useState(null);
   const [loanDetailsLoading, setLoanDetailsLoading] = useState(false);
+  const [openingLoanId, setOpeningLoanId] = useState(null);
 
   useEffect(() => {
     fetchLoans();
@@ -73,6 +74,7 @@ function Loans() {
 
   const openLoanDetails = async (loanId) => {
     try {
+      setOpeningLoanId(loanId);
       setLoanDetailsLoading(true);
       const response = await axios.get(`${API_URL}/loans/${loanId}`);
       setSelectedLoan(response.data?.loan || null);
@@ -84,6 +86,7 @@ function Loans() {
       setError(errorMessage);
     } finally {
       setLoanDetailsLoading(false);
+      setOpeningLoanId(null);
     }
   };
 
@@ -190,9 +193,10 @@ function Loans() {
                   <td className="whitespace-nowrap px-6 py-4 text-right text-sm font-medium">
                   <button
                     onClick={() => openLoanDetails(loan.id)}
-                    className="text-[#0f4d7a] hover:text-[#011325]"
+                    disabled={openingLoanId === loan.id}
+                    className="text-[#0f4d7a] hover:text-[#011325] disabled:cursor-not-allowed disabled:opacity-60"
                   >
-                    View Details
+                    {openingLoanId === loan.id ? 'Opening...' : 'View Details'}
                     </button>
                   </td>
                 </tr>
