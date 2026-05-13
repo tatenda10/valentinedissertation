@@ -5,11 +5,39 @@ const logAudit = async (adminId, adminUsername, action, entityType, entityId, de
   const connection = await getConnection();
   
   try {
-    await connection.execute(
-      `INSERT INTO audit_logs (admin_id, admin_username, action, entity_type, entity_id, details, ip_address, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, NOW())`,
-      [adminId, adminUsername, action, entityType || null, entityId || null, details || null, ipAddress || null]
-    );
+    const [columns] = await connection.execute('SHOW COLUMNS FROM audit_logs');
+    const fieldNames = new Set(columns.map((column) => column.Field));
+    const usesAdminSchema = fieldNames.has('admin_id') && fieldNames.has('action');
+
+    if (usesAdminSchema) {
+      await connection.execute(
+        `INSERT INTO audit_logs (admin_id, admin_username, action, entity_type, entity_id, details, ip_address, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, NOW())`,
+        [adminId, adminUsername, action, entityType || null, entityId || null, details || null, ipAddress || null]
+      );
+    } else {
+      await connection.execute(
+        `INSERT INTO audit_logs (
+           user_id,
+           action_type,
+           action_description,
+           entity_type,
+           entity_id,
+           ip_address,
+           status,
+           created_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, NOW())`,
+        [
+          adminId || null,
+          action || 'UPDATE',
+          details || null,
+          String(entityType || 'SYSTEM').toUpperCase(),
+          entityId || null,
+          ipAddress || null,
+          'SUCCESS',
+        ]
+      );
+    }
   } catch (error) {
     console.error('Audit log error:', error);
     // Don't throw - audit logging shouldn't break the main flow

@@ -5,8 +5,14 @@ import API_URL from '../../utils/Api';
 const badgeStyles = {
   LOAN_APPROVED: 'bg-emerald-100 text-emerald-700',
   LOAN_REJECTED: 'bg-red-100 text-red-700',
+  LOAN_REPAYMENT_RECORDED: 'bg-teal-100 text-teal-700',
   LOGIN: 'bg-blue-100 text-blue-700',
   UPDATE: 'bg-amber-100 text-amber-700',
+};
+
+const statusStyles = {
+  SUCCESS: 'bg-emerald-100 text-emerald-700',
+  FAILURE: 'bg-red-100 text-red-700',
 };
 
 const Audit_logs = () => {
@@ -116,6 +122,7 @@ const Audit_logs = () => {
               <option value="">All actions</option>
               <option value="LOAN_APPROVED">Loan approved</option>
               <option value="LOAN_REJECTED">Loan rejected</option>
+              <option value="LOAN_REPAYMENT_RECORDED">Repayment recorded</option>
               <option value="LOGIN">Login</option>
               <option value="UPDATE">Update</option>
             </select>
@@ -166,29 +173,59 @@ const Audit_logs = () => {
           <div className="p-8 text-center text-slate-600">No audit entries matched the selected filters.</div>
         ) : (
           <div className="overflow-x-auto">
-            <table className="min-w-full divide-y divide-slate-200">
+            <table className="min-w-[1180px] table-fixed divide-y divide-slate-200">
+              <colgroup>
+                <col className="w-[210px]" />
+                <col className="w-[120px]" />
+                <col className="w-[105px]" />
+                <col className="w-[110px]" />
+                <col className="w-[110px]" />
+                <col className="w-[250px]" />
+                <col className="w-[110px]" />
+                <col className="w-[230px]" />
+              </colgroup>
               <thead className="bg-slate-50">
                 <tr>
                   <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-500">When</th>
                   <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-500">Actor</th>
                   <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-500">Action</th>
+                  <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-500">Status</th>
                   <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-500">Entity</th>
                   <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-500">Details</th>
                   <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-500">IP Address</th>
+                  <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-500">User Agent</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100 bg-white">
                 {logs.map((log) => (
                   <tr key={log.id} className="align-top hover:bg-slate-50/70">
-                    <td className="whitespace-nowrap px-6 py-4 text-sm text-slate-700">{formatDate(log.created_at)}</td>
-                    <td className="whitespace-nowrap px-6 py-4 text-sm font-medium text-slate-900">{log.actor_name || 'System'}</td>
-                    <td className="whitespace-nowrap px-6 py-4">{getActionBadge(log.action)}</td>
-                    <td className="whitespace-nowrap px-6 py-4 text-sm text-slate-700">
+                    <td className="px-4 py-4 text-sm leading-6 text-slate-700">{formatDate(log.created_at)}</td>
+                    <td className="px-4 py-4 text-sm font-medium leading-6 text-slate-900">
+                      <div>{log.actor_name || 'System'}</div>
+                      <div className="text-xs text-slate-500">{log.actor_id ? `ID: ${log.actor_id}` : 'No actor ID'}</div>
+                    </td>
+                    <td className="px-4 py-4 align-top">{getActionBadge(log.action)}</td>
+                    <td className="px-4 py-4 align-top">
+                      <span
+                        className={`inline-flex rounded-full px-2.5 py-1 text-xs font-semibold ${
+                          statusStyles[log.status] || 'bg-slate-100 text-slate-700'
+                        }`}
+                      >
+                        {log.status || 'N/A'}
+                      </span>
+                    </td>
+                    <td className="px-4 py-4 text-sm leading-6 text-slate-700">
                       {log.entity_type || '-'}
                       {log.entity_id ? ` #${log.entity_id}` : ''}
                     </td>
-                    <td className="max-w-xl px-6 py-4 text-sm text-slate-600">{log.details || '-'}</td>
-                    <td className="whitespace-nowrap px-6 py-4 text-sm text-slate-600">{log.ip_address || '-'}</td>
+                    <td className="px-4 py-4 text-sm leading-6 text-slate-600">
+                      <div className="break-words">{log.details || '-'}</div>
+                      {log.error_message ? <div className="mt-1 text-xs text-red-600">{log.error_message}</div> : null}
+                    </td>
+                    <td className="px-4 py-4 font-mono text-xs leading-6 text-slate-600">{log.ip_address || '-'}</td>
+                    <td className="px-4 py-4 text-xs leading-5 text-slate-500">
+                      <div className="break-words">{log.user_agent || '-'}</div>
+                    </td>
                   </tr>
                 ))}
               </tbody>

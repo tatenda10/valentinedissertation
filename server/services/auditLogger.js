@@ -77,8 +77,9 @@ class AuditLogger {
                     new_values,
                     ip_address,
                     user_agent,
+                    status,
                     error_message
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
                 [
                     validUserId,
                     actionType,
@@ -89,6 +90,7 @@ class AuditLogger {
                     newValuesJson,
                     ipAddress,
                     userAgent,
+                    status,
                     errorMessage
                 ]
             );

@@ -364,6 +364,36 @@ function Loans() {
                 </div>
               </div>
 
+              <div className="col-span-2 rounded-xl border border-slate-200 bg-white p-4">
+                <h4 className="mb-3 text-sm font-semibold text-slate-800">Repayment Progress</h4>
+                <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
+                  <div>
+                    <div className="text-sm font-medium text-slate-500">Total Paid</div>
+                    <div className="mt-1 text-sm text-slate-900">
+                      {formatCurrency(selectedLoan.repayment_summary?.totalPaid || 0)}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-sm font-medium text-slate-500">Remaining Balance</div>
+                    <div className="mt-1 text-sm text-slate-900">
+                      {formatCurrency(selectedLoan.repayment_summary?.remainingBalance || selectedLoan.amount)}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-sm font-medium text-slate-500">Installments Paid</div>
+                    <div className="mt-1 text-sm text-slate-900">
+                      {selectedLoan.repayment_summary?.installmentsPaid || 0}/{selectedLoan.repayment_summary?.totalInstallments || selectedLoan.duration || 0}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-sm font-medium text-slate-500">Next Due Date</div>
+                    <div className="mt-1 text-sm text-slate-900">
+                      {formatDate(selectedLoan.repayment_summary?.nextDueDate)}
+                    </div>
+                  </div>
+                </div>
+              </div>
+
               {selectedLoan.statement_overview && (
                 <div className="col-span-2 rounded-xl border border-blue-100 bg-blue-50 p-4">
                   <div className="mb-3 flex items-center justify-between">

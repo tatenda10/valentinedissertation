@@ -10,6 +10,7 @@ const getAuditSchemaConfig = async (connection) => {
 
   return {
     fieldNames,
+    actorIdColumn: fieldNames.has('admin_id') ? 'admin_id' : 'user_id',
     actionColumn: usesAdminSchema ? 'action' : 'action_type',
     actorLabelColumn: usesAdminSchema
       ? "COALESCE(admin_username, CONCAT('Admin #', admin_id))"
@@ -34,8 +35,7 @@ const buildAuditWhereClause = ({ action, date, actorId }, config) => {
   }
 
   if (actorId) {
-    const actorColumn = config.fieldNames.has('admin_id') ? 'admin_id' : 'user_id';
-    conditions.push(`${actorColumn} = ?`);
+    conditions.push(`${config.actorIdColumn} = ?`);
     params.push(actorId);
   }
 
@@ -60,10 +60,13 @@ router.get('/audit-logs', authenticate, isAdmin, async (req, res) => {
         SELECT
           id,
           created_at,
+          ${schemaConfig.actorIdColumn} AS actor_id,
           ${schemaConfig.actionColumn} AS action,
           ${schemaConfig.actorLabelColumn} AS actor_name,
           ${schemaConfig.detailsColumn} AS details,
           ip_address,
+          ${schemaConfig.fieldNames.has('user_agent') ? 'user_agent' : 'NULL'} AS user_agent,
+          ${schemaConfig.fieldNames.has('error_message') ? 'error_message' : 'NULL'} AS error_message,
           entity_type,
           entity_id,
           ${schemaConfig.statusColumn ? `${schemaConfig.statusColumn}` : 'NULL'} AS status
@@ -79,7 +82,7 @@ router.get('/audit-logs', authenticate, isAdmin, async (req, res) => {
       `
         SELECT
           COUNT(*) AS total,
-          COUNT(DISTINCT ${schemaConfig.fieldNames.has('admin_id') ? 'admin_id' : 'user_id'}) AS unique_actors,
+          COUNT(DISTINCT ${schemaConfig.actorIdColumn}) AS unique_actors,
           SUM(CASE WHEN ${schemaConfig.actionColumn} = 'LOAN_APPROVED' THEN 1 ELSE 0 END) AS total_approvals,
           SUM(CASE WHEN ${schemaConfig.actionColumn} = 'LOAN_REJECTED' THEN 1 ELSE 0 END) AS total_rejections
         FROM audit_logs
@@ -116,10 +119,13 @@ router.get('/audit-logs/:id', authenticate, isAdmin, async (req, res) => {
         SELECT
           id,
           created_at,
+          ${schemaConfig.actorIdColumn} AS actor_id,
           ${schemaConfig.actionColumn} AS action,
           ${schemaConfig.actorLabelColumn} AS actor_name,
           ${schemaConfig.detailsColumn} AS details,
           ip_address,
+          ${schemaConfig.fieldNames.has('user_agent') ? 'user_agent' : 'NULL'} AS user_agent,
+          ${schemaConfig.fieldNames.has('error_message') ? 'error_message' : 'NULL'} AS error_message,
           entity_type,
           entity_id,
           ${schemaConfig.statusColumn ? `${schemaConfig.statusColumn}` : 'NULL'} AS status

@@ -41,6 +41,17 @@ const buildMlPayload = ({
 
 const roundCurrency = (value) => Number((Number(value) || 0).toFixed(2));
 
+const addMonths = (dateValue, months) => {
+  const date = new Date(dateValue);
+  if (Number.isNaN(date.getTime())) {
+    return null;
+  }
+
+  const nextDate = new Date(date);
+  nextDate.setMonth(nextDate.getMonth() + months);
+  return nextDate;
+};
+
 const calculateAffordabilityDetails = (loanLike = {}) => {
   const requestedAmount = Number(loanLike.amount || 0);
   const monthlyIncome = Number(loanLike.monthly_income || loanLike.monthlyIncome || loanLike.client_income || 0);
@@ -147,13 +158,127 @@ const buildStatementOverview = (statementAnalysis) => {
   };
 };
 
-const enrichLoanRecord = async (loan, { includeStatementAnalysis = false } = {}) => {
+const fetchLoanRepayments = async (connection, loanId) => {
+  try {
+    const [repayments] = await connection.execute(
+      `SELECT
+          lr.*,
+          u.username AS recorded_by_name
+       FROM loan_repayments lr
+       LEFT JOIN users u ON u.id = lr.recorded_by_user_id
+       WHERE lr.loan_id = ?
+       ORDER BY lr.payment_date DESC, lr.id DESC`,
+      [loanId],
+    );
+
+    return repayments;
+  } catch (error) {
+    if (error?.code === 'ER_NO_SUCH_TABLE') {
+      return [];
+    }
+
+    throw error;
+  }
+};
+
+const fetchRepaymentTotalsMap = async (connection, loanIds = []) => {
+  if (!loanIds.length) {
+    return new Map();
+  }
+
+  const placeholders = loanIds.map(() => '?').join(', ');
+
+  try {
+    const [rows] = await connection.execute(
+      `SELECT
+          loan_id,
+          COUNT(*) AS repaymentCount,
+          SUM(amount_paid) AS totalPaid,
+          MAX(payment_date) AS lastPaymentDate
+       FROM loan_repayments
+       WHERE loan_id IN (${placeholders})
+       GROUP BY loan_id`,
+      loanIds,
+    );
+
+    return new Map(rows.map((row) => [Number(row.loan_id), row]));
+  } catch (error) {
+    if (error?.code === 'ER_NO_SUCH_TABLE') {
+      return new Map();
+    }
+
+    throw error;
+  }
+};
+
+const resolveRecordedByUserId = async (connection, actorId) => {
+  if (!actorId) {
+    return null;
+  }
+
+  const [users] = await connection.execute(
+    'SELECT id FROM users WHERE id = ? LIMIT 1',
+    [actorId],
+  );
+
+  return users.length ? actorId : null;
+};
+
+const buildRepaymentSummary = (loan, repayments = [], aggregate = null) => {
+  const principalAmount = roundCurrency(loan?.amount);
+  const monthlyInstallment = roundCurrency(loan?.monthly_payment);
+  const durationMonths = Math.max(Number(loan?.duration || 0), 0);
+  const scheduledRepaymentTotal =
+    monthlyInstallment > 0 && durationMonths > 0
+      ? roundCurrency(monthlyInstallment * durationMonths)
+      : principalAmount;
+  const totalPaid = roundCurrency(
+    aggregate?.totalPaid ??
+      repayments.reduce((sum, repayment) => sum + Number(repayment.amount_paid || 0), 0),
+  );
+  const remainingBalance = roundCurrency(Math.max(scheduledRepaymentTotal - totalPaid, 0));
+  const rawInstallmentsPaid =
+    monthlyInstallment > 0 ? totalPaid / monthlyInstallment : 0;
+  const installmentsPaid = Math.min(
+    durationMonths || Number.MAX_SAFE_INTEGER,
+    Math.floor(rawInstallmentsPaid + 0.00001),
+  );
+  const progressPercent =
+    scheduledRepaymentTotal > 0
+      ? Math.min(roundCurrency((totalPaid / scheduledRepaymentTotal) * 100), 100)
+      : 0;
+  const lastPayment = repayments[0] || null;
+  const repaymentCount = Number(aggregate?.repaymentCount ?? repayments.length);
+  const nextDueDate =
+    loan?.status === 'approved' && durationMonths > 0
+      ? addMonths(loan.decision_date || loan.application_date, installmentsPaid + 1)
+      : null;
+
+  return {
+    totalPaid,
+    remainingBalance,
+    scheduledRepaymentTotal,
+    monthlyInstallment,
+    totalInstallments: durationMonths,
+    installmentsPaid,
+    progressPercent,
+    lastPaymentDate: aggregate?.lastPaymentDate || lastPayment?.payment_date || null,
+    lastPaymentAmount: roundCurrency(lastPayment?.amount_paid || 0),
+    nextDueDate: nextDueDate ? nextDueDate.toISOString() : null,
+    repaymentCount,
+  };
+};
+
+const enrichLoanRecord = async (connection, loan, { includeStatementAnalysis = false } = {}) => {
   const rejectionAssessment = buildRejectionAssessment(loan);
+  const repayments = await fetchLoanRepayments(connection, loan.id).catch(() => []);
   const enrichedLoan = {
     ...loan,
     affordability: rejectionAssessment.affordability,
     recommended_amount: rejectionAssessment.affordability.recommendedAmount,
     max_affordable_loan: rejectionAssessment.affordability.maxAffordableLoan,
+    repayment_history: repayments,
+    repayment_summary: buildRepaymentSummary(loan, repayments),
   };
 
   if (includeStatementAnalysis && loan?.statement_path) {
@@ -416,11 +541,18 @@ const getAllLoans = async (req, res) => {
        ORDER BY l.application_date DESC`
     );
 
+    const repaymentTotalsMap = await fetchRepaymentTotalsMap(
+      connection,
+      loans.map((loan) => loan.id),
+    );
+
     const enrichedLoans = loans.map((loan) => ({
       ...loan,
       affordability: calculateAffordabilityDetails(loan),
       recommended_amount: buildRejectionAssessment(loan).affordability.recommendedAmount,
       max_affordable_loan: buildRejectionAssessment(loan).affordability.maxAffordableLoan,
+      repayment_summary: buildRepaymentSummary(loan, [], repaymentTotalsMap.get(loan.id) || null),
+      repayment_count: Number(repaymentTotalsMap.get(loan.id)?.repaymentCount || 0),
     }));
 
     res.json({ loans: enrichedLoans });
@@ -507,8 +639,13 @@ const getLoanById = async (req, res) => {
       return res.status(404).json({ message: 'Loan not found' });
     }
 
+    const isAdminUser = (req.user?.roles || []).some((role) => String(role).toLowerCase() === 'admin');
+    if (!isAdminUser && Number(loans[0].client_id) !== Number(req.user?.userId)) {
+      return res.status(403).json({ message: 'You can only access your own loan details' });
+    }
+
     // statement_path is automatically included in l.*
-    const enrichedLoan = await enrichLoanRecord(loans[0], { includeStatementAnalysis: true });
+    const enrichedLoan = await enrichLoanRecord(connection, loans[0], { includeStatementAnalysis: true });
 
     res.json({ loan: enrichedLoan });
 
@@ -529,6 +666,11 @@ const getClientLoans = async (req, res) => {
 
   try {
     const { clientId } = req.params;
+    const isAdminUser = (req.user?.roles || []).some((role) => String(role).toLowerCase() === 'admin');
+
+    if (!isAdminUser && Number(clientId) !== Number(req.user?.userId)) {
+      return res.status(403).json({ message: 'You can only access your own loans' });
+    }
 
     const [loans] = await connection.execute(
       `SELECT l.*, c.first_name, c.last_name, c.email, c.phone_number
@@ -537,6 +679,11 @@ const getClientLoans = async (req, res) => {
        WHERE l.client_id = ?
        ORDER BY l.application_date DESC`,
       [clientId]
+    );
+
+    const repaymentTotalsMap = await fetchRepaymentTotalsMap(
+      connection,
+      loans.map((loan) => loan.id),
     );
 
     const summary = {
@@ -551,6 +698,8 @@ const getClientLoans = async (req, res) => {
       affordability: calculateAffordabilityDetails(loan),
       recommended_amount: buildRejectionAssessment(loan).affordability.recommendedAmount,
       max_affordable_loan: buildRejectionAssessment(loan).affordability.maxAffordableLoan,
+      repayment_summary: buildRepaymentSummary(loan, [], repaymentTotalsMap.get(loan.id) || null),
+      repayment_count: Number(repaymentTotalsMap.get(loan.id)?.repaymentCount || 0),
     }));
 
     res.json({ loans: enrichedLoans, summary });
@@ -708,6 +857,129 @@ const updateLoanStatus = async (req, res) => {
   }
 };
 
+const getLoanRepayments = async (req, res) => {
+  const connection = await getConnection();
+
+  try {
+    const { id } = req.params;
+    const [loanRows] = await connection.execute(
+      'SELECT id, client_id, amount, duration, monthly_payment, status, application_date, decision_date FROM loans WHERE id = ?',
+      [id],
+    );
+
+    if (!loanRows.length) {
+      return res.status(404).json({ message: 'Loan not found' });
+    }
+
+    const loan = loanRows[0];
+    const isAdminUser = (req.user?.roles || []).some((role) => String(role).toLowerCase() === 'admin');
+    if (!isAdminUser && Number(loan.client_id) !== Number(req.user?.userId)) {
+      return res.status(403).json({ message: 'You can only access your own loan repayments' });
+    }
+
+    const repayments = await fetchLoanRepayments(connection, id);
+    res.json({
+      repayments,
+      summary: buildRepaymentSummary(loan, repayments),
+    });
+  } catch (error) {
+    console.error('Get loan repayments error:', error);
+    res.status(500).json({ message: 'Server error while fetching loan repayments', error: error.message });
+  } finally {
+    connection.release();
+  }
+};
+
+const recordRepayment = async (req, res) => {
+  const connection = await getConnection();
+
+  try {
+    const { id } = req.params;
+    const { amount, payment_date, payment_method, reference_note } = req.body;
+    const amountPaid = roundCurrency(amount);
+
+    if (!(amountPaid > 0)) {
+      return res.status(400).json({ message: 'Repayment amount must be greater than zero' });
+    }
+
+    const [loanRows] = await connection.execute(
+      'SELECT id, client_id, loan_reference, amount, duration, monthly_payment, status, application_date, decision_date FROM loans WHERE id = ?',
+      [id],
+    );
+
+    if (!loanRows.length) {
+      return res.status(404).json({ message: 'Loan not found' });
+    }
+
+    const loan = loanRows[0];
+    const isAdminUser = (req.user?.roles || []).some((role) => String(role).toLowerCase() === 'admin');
+    if (!isAdminUser && Number(loan.client_id) !== Number(req.user?.userId)) {
+      return res.status(403).json({ message: 'You can only record repayments for your own loans' });
+    }
+
+    if (String(loan.status).toLowerCase() !== 'approved') {
+      return res.status(400).json({ message: 'Repayments can only be recorded for approved loans' });
+    }
+
+    const existingRepayments = await fetchLoanRepayments(connection, id);
+    const currentSummary = buildRepaymentSummary(loan, existingRepayments);
+
+    if (amountPaid > currentSummary.remainingBalance && currentSummary.remainingBalance > 0) {
+      return res.status(400).json({
+        message: `Repayment exceeds remaining balance of $${currentSummary.remainingBalance.toFixed(2)}`,
+      });
+    }
+
+    const normalizedPaymentDate = payment_date || new Date().toISOString().slice(0, 10);
+    const recordedByUserId = await resolveRecordedByUserId(
+      connection,
+      req.user?.userId || null,
+    );
+
+    await connection.execute(
+      `INSERT INTO loan_repayments (
+          loan_id,
+          amount_paid,
+          payment_date,
+          payment_method,
+          reference_note,
+          recorded_by_user_id,
+          created_at
+       ) VALUES (?, ?, ?, ?, ?, ?, NOW())`,
+      [
+        id,
+        amountPaid,
+        normalizedPaymentDate,
+        toNullableValue(payment_method),
+        toNullableValue(reference_note),
+        recordedByUserId,
+      ],
+    );
+
+    await logAudit(
+      recordedByUserId,
+      req.user?.username || req.user?.email || 'Unknown User',
+      'LOAN_REPAYMENT_RECORDED',
+      'loan',
+      id,
+      `Repayment of $${amountPaid.toFixed(2)} recorded for loan ${loan.loan_reference}`,
+      req.ip || req.connection?.remoteAddress || 'Unknown IP',
+    );
+
+    const repayments = await fetchLoanRepayments(connection, id);
+    res.status(201).json({
+      message: 'Repayment recorded successfully',
+      repayments,
+      summary: buildRepaymentSummary(loan, repayments),
+    });
+  } catch (error) {
+    console.error('Record repayment error:', error);
+    res.status(500).json({ message: 'Server error while recording repayment', error: error.message });
+  } finally {
+    connection.release();
+  }
+};
+
 // ================= EXPORT =================
 module.exports = {
   submitLoan,
@@ -718,6 +990,8 @@ module.exports = {
   getLoanById,
   getClientLoans,
   updateLoanStatus,
+  getLoanRepayments,
+  recordRepayment,
   generateRejectionReason,
   analyzeEcoCashStatement,
 };

@@ -6,7 +6,8 @@
   "scripts": {
     "start": "node app.js",
     "dev": "nodemon app.js",
-    "create-sysadmin": "node scripts/createSysAdmin.js"
+    "create-sysadmin": "node scripts/createSysAdmin.js",
+    "migrate:loan-repayments": "node scripts/runLoanRepaymentsMigration.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",

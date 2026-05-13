@@ -88,7 +88,7 @@ const LoanDetails = () => {
         </button>
         <h1 className="mt-4 text-2xl font-semibold">Loan Details</h1>
         <p className="mt-2 text-sm text-slate-200">
-          Inspect the application, review the rejection rationale, and check the extracted EcoCash statement summary.
+          Inspect the application, review the rejection rationale, track repayments, and check the extracted EcoCash statement summary.
         </p>
       </section>
 
@@ -184,6 +184,77 @@ const LoanDetails = () => {
               View Uploaded Statement
             </button>
           </div>
+        </div>
+      </section>
+
+      <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+        <div className="mb-4 flex items-center justify-between">
+          <div>
+            <h2 className="text-lg font-semibold text-slate-900">Repayment Tracking</h2>
+            <p className="mt-1 text-sm text-slate-500">Outstanding balance, paid amount, and recorded repayment activity for this loan.</p>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-4">
+          <div className="rounded-xl border border-slate-100 bg-slate-50 p-4">
+            <p className="text-xs font-medium uppercase tracking-wide text-slate-500">Total paid</p>
+            <p className="mt-2 text-2xl font-semibold text-emerald-700">{formatCurrency(loan.repayment_summary?.totalPaid || 0)}</p>
+          </div>
+          <div className="rounded-xl border border-slate-100 bg-slate-50 p-4">
+            <p className="text-xs font-medium uppercase tracking-wide text-slate-500">Remaining balance</p>
+            <p className="mt-2 text-2xl font-semibold text-slate-900">{formatCurrency(loan.repayment_summary?.remainingBalance || loan.amount)}</p>
+          </div>
+          <div className="rounded-xl border border-slate-100 bg-slate-50 p-4">
+            <p className="text-xs font-medium uppercase tracking-wide text-slate-500">Installments paid</p>
+            <p className="mt-2 text-2xl font-semibold text-slate-900">
+              {loan.repayment_summary?.installmentsPaid || 0}/{loan.repayment_summary?.totalInstallments || loan.duration || 0}
+            </p>
+          </div>
+          <div className="rounded-xl border border-slate-100 bg-slate-50 p-4">
+            <p className="text-xs font-medium uppercase tracking-wide text-slate-500">Next due date</p>
+            <p className="mt-2 text-2xl font-semibold text-slate-900">{formatDate(loan.repayment_summary?.nextDueDate)}</p>
+          </div>
+        </div>
+
+        <div className="mt-5">
+          <div className="h-3 overflow-hidden rounded-full bg-slate-100">
+            <div
+              className="h-full rounded-full bg-emerald-500 transition-all"
+              style={{ width: `${Math.min(Number(loan.repayment_summary?.progressPercent || 0), 100)}%` }}
+            />
+          </div>
+          <p className="mt-2 text-sm text-slate-600">{loan.repayment_summary?.progressPercent || 0}% of the loan value has been repaid.</p>
+        </div>
+
+        <div className="mt-6 overflow-x-auto">
+          <table className="min-w-full divide-y divide-slate-200">
+            <thead className="bg-slate-50">
+              <tr>
+                <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-500">Payment Date</th>
+                <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-500">Amount</th>
+                <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-500">Method</th>
+                <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-500">Recorded By</th>
+                <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-500">Note</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100 bg-white">
+              {(loan.repayment_history || []).length ? (
+                loan.repayment_history.map((repayment) => (
+                  <tr key={repayment.id}>
+                    <td className="px-4 py-3 text-sm text-slate-700">{formatDate(repayment.payment_date)}</td>
+                    <td className="px-4 py-3 text-sm font-medium text-slate-900">{formatCurrency(repayment.amount_paid)}</td>
+                    <td className="px-4 py-3 text-sm text-slate-600">{repayment.payment_method || '-'}</td>
+                    <td className="px-4 py-3 text-sm text-slate-600">{repayment.recorded_by_name || repayment.recorded_by_user_id || '-'}</td>
+                    <td className="px-4 py-3 text-sm text-slate-600">{repayment.reference_note || '-'}</td>
+                  </tr>
+                ))
+              ) : (
+                <tr>
+                  <td colSpan="5" className="px-4 py-6 text-center text-sm text-slate-500">No repayments have been recorded for this loan yet.</td>
+                </tr>
+              )}
+            </tbody>
+          </table>
         </div>
       </section>
 

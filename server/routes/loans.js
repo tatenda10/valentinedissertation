@@ -597,6 +597,10 @@ router.get('/pdf/:filename', authenticate, isAdmin, async (req, res) => {
  */
 router.get('/:id', authenticate, LoansController.getLoanById);
 
+router.get('/:id/repayments', authenticate, LoansController.getLoanRepayments);
+
+router.post('/:id/repayments', authenticate, LoansController.recordRepayment);
+
 /**
  * @swagger
  * /api/loans/{id}/status:
